@@ -22,13 +22,45 @@ function start_server(; host="127.0.0.1", port=8080)
 		if method == "GET" && path=="/"
 			HTTP.Response(200,
 				["Content-Type" => "text/html; charset=utf-8"],
-				"<h1>Hello</h1>",
+				"""
+				<h1>Hello</h1>
+				<link href="https://unpkg.com/tabulator-tables@6.2.5/dist/css/tabulator.min.css" rel="stylesheet">
+				<div id="accounts-table"></div>
+
+				<script src="https://unpkg.com/tabulator-tables@6.2.5/dist/js/tabulator.min.js"></script>
+				<script src="/app.js"></script>
+				"""
 			)
+
+		elseif method == "GET" && path=="/app.js"
+			    js = raw"""
+    async function loadAccounts() {
+      const res = await fetch("/api/summarize_accounts");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+
+      new Tabulator("#accounts-table", {
+        layout: "fitColumns",
+        data: data,
+        columns: [
+          { title: "Account", field: "account_name" },
+          { title: "Asset", field: "asset_name" },
+          { title: "Market Value", field: "market_value", hozAlign: "right", formatter: "money" },
+        ],
+      });
+    }
+
+    loadAccounts().catch(err => {
+      console.error(err);
+      document.querySelector("#accounts-table").innerText = "Failed to load accounts.";
+    });
+    """
+    return HTTP.Response(200, ["Content-Type" => "text/javascript; charset=utf-8"], js)
 
 		elseif method == "GET" && path=="/api/summarize_accounts"
 			v = vault(load_vault_path())
 			a = summarize_accounts(v)
-			rows = [(account_name = n, market_value = v) for (n, v) in zip(a.account_name, a.market_value)]
+			rows = [(account_name = n, asset_name = a, market_value = v) for (n, a, v) in zip(a.account_name, a.asset_name, a.market_value)]
 			return json_response(rows)
 
 		else
