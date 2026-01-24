@@ -2,3 +2,4 @@
 HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
 PersonalFinance = "45283282-7ae1-4bec-8b98-4fbd25d62242"
+TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
