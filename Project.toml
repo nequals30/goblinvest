@@ -1,5 +1,7 @@
 [deps]
 HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
+Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
+LoggingExtras = "e6f89c97-d47a-5376-807f-9c37f3926c36"
 PersonalFinance = "45283282-7ae1-4bec-8b98-4fbd25d62242"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
