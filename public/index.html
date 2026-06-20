@@ -39,10 +39,23 @@
       <!-- dashboard view -->
       <section id="dash-view" hidden>
         <div id="accounts-table"></div>
+
+        <section id="mv-chart-section">
+          <div class="section-head">
+            <h2>Net worth over time</h2>
+            <div class="chart-toolbar">
+              <span class="isolated-label" id="mv-isolated-label" hidden></span>
+              <button type="button" id="mv-reset">show all</button>
+            </div>
+          </div>
+          <div id="mv-chart"></div>
+          <div id="mv-empty" class="empty-state" hidden>No transactions yet — chart will appear once data is loaded.</div>
+        </section>
       </section>
     </main>
 
     <script src="https://unpkg.com/tabulator-tables@6.2.5/dist/js/tabulator.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

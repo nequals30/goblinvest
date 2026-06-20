@@ -109,3 +109,50 @@ html, body {
 
 /* dashboard */
 #accounts-table { background: #fff; border: 1px solid var(--border); }
+
+#mv-chart-section { margin-top: 18px; }
+#mv-chart-section .section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0 0 6px 0;
+}
+#mv-chart-section h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.chart-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.chart-toolbar .isolated-label {
+  color: var(--muted);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+.chart-toolbar button {
+  border: 1px solid var(--border);
+  background: #fff;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+#mv-chart {
+  width: 100%;
+  height: 520px;
+  background: #fff;
+  border: 1px solid var(--border);
+}
+.empty-state {
+  padding: 16px;
+  color: var(--muted);
+  font-size: 12px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-top: 0;
+}

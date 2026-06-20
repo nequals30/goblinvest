@@ -3,7 +3,7 @@ using HTTP
 
 using ..Responses: json_response
 using ..Auth: with_session
-using ..API.AccountsAPI: summarize_accounts_handler
+using ..API.AccountsAPI: summarize_accounts_handler, accumulate_mv_handler
 using ..API.AuthAPI: signup_handler, login_handler, logout_handler, me_handler
 
 export router
@@ -52,6 +52,9 @@ function router(req::HTTP.Request)
         # App API — gated
         if method == "GET" && path == "/api/summarize_accounts"
             return with_session(summarize_accounts_handler)(req)
+        end
+        if method == "GET" && path == "/api/accumulate_mv"
+            return with_session(accumulate_mv_handler)(req)
         end
 
         # Static
