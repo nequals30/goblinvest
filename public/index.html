@@ -8,10 +8,39 @@
   </head>
 
   <body>
-    <h1>Welcome to Goblinvest</h1>
-	You can do <i>anything</i> with Goblinvest.
-	<hr/>
-    <div id="accounts-table"></div>
+    <header id="topbar" hidden>
+      <span class="brand">Goblinvest</span>
+      <span class="who" id="who"></span>
+      <button id="logout-btn" type="button">log out</button>
+    </header>
+
+    <main id="app">
+      <!-- auth view -->
+      <section id="auth-view" hidden>
+        <h1>Goblinvest</h1>
+        <div class="auth-card">
+          <div class="tabs">
+            <button type="button" class="tab is-active" data-mode="login">log in</button>
+            <button type="button" class="tab" data-mode="signup">sign up</button>
+          </div>
+          <form id="auth-form" autocomplete="off">
+            <label>username
+              <input type="text" name="username" required autocomplete="username" />
+            </label>
+            <label>password
+              <input type="password" name="password" required autocomplete="current-password" />
+            </label>
+            <button type="submit" id="auth-submit">log in</button>
+            <div class="auth-error" id="auth-error" hidden></div>
+          </form>
+        </div>
+      </section>
+
+      <!-- dashboard view -->
+      <section id="dash-view" hidden>
+        <div id="accounts-table"></div>
+      </section>
+    </main>
 
     <script src="https://unpkg.com/tabulator-tables@6.2.5/dist/js/tabulator.min.js"></script>
     <script src="/app.js"></script>

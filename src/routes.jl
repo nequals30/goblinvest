@@ -1,8 +1,10 @@
 module Routes
 using HTTP
 
-using ..Responses: cors_headers
+using ..Responses: json_response
+using ..Auth: with_session
 using ..API.AccountsAPI: summarize_accounts_handler
+using ..API.AuthAPI: signup_handler, login_handler, logout_handler, me_handler
 
 export router
 
@@ -31,21 +33,34 @@ function router(req::HTTP.Request)
         method = String(req.method)
         path   = HTTP.URI(req.target).path
 
-        if method == "OPTIONS"
-            return HTTP.Response(204, cors_headers(); body="")
+        # Auth API — public
+        if method == "POST" && path == "/api/signup"
+            return signup_handler(req)
+        end
+        if method == "POST" && path == "/api/login"
+            return login_handler(req)
+        end
+        if method == "POST" && path == "/api/logout"
+            return logout_handler(req)
         end
 
+        # Auth API — gated
+        if method == "GET" && path == "/api/me"
+            return with_session(me_handler)(req)
+        end
+
+        # App API — gated
         if method == "GET" && path == "/api/summarize_accounts"
-            return summarize_accounts_handler(req)
+            return with_session(summarize_accounts_handler)(req)
         end
 
+        # Static
         if method == "GET"
             return serve_static(path)
         end
 
         return HTTP.Response(404, "Not Found")
     catch err
-        # Ignore broken pipe / client disconnects
         if err isa Base.IOError && getfield(err, :code) == Base.Libc.EPIPE
             return HTTP.Response(204)
         end
@@ -54,4 +69,3 @@ function router(req::HTTP.Request)
 end
 
 end # module
-
