@@ -37,16 +37,13 @@ function accumulate_mv_handler(_, user::DB.User)
     v = _load_vault(user)
     _has_transactions(v) || return json_response(Dict("dates" => String[], "series" => []))
 
-    out, allDts = accumulate_mv(v)
+    out, allDts = accumulate_mv(v; group_by = :account_name)
 
     dates = string.(allDts)
     cols = sort(DataFrames.names(out))   # stable stacking order
     series = map(cols) do col
-        parts = split(col, "::"; limit = 2)
-        account = length(parts) >= 1 ? String(parts[1]) : ""
-        asset   = length(parts) >= 2 ? String(parts[2]) : ""
-        values  = [_jval(x) for x in out[!, col]]
-        Dict("name" => col, "account" => account, "asset" => asset, "values" => values)
+        values = [_jval(x) for x in out[!, col]]
+        Dict("name" => col, "values" => values)
     end
 
     return json_response(Dict("dates" => dates, "series" => series))
