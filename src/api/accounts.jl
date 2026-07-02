@@ -22,10 +22,11 @@ function summarize_accounts_handler(_, user::DB.User)
     a = summarize_accounts(v)
 
     rows = [(account_name = n,
+             account_group_name = g,
              asset_name = an,
              market_value = mv,
              most_recent_trans_date = (d === missing || d === nothing) ? nothing : string(d))
-            for (n, an, mv, d) in zip(a.account_name, a.asset_name, a.market_value, a.most_recent_trans_date)]
+            for (n, g, an, mv, d) in zip(a.account_name, a.account_group_name, a.asset_name, a.market_value, a.most_recent_trans_date)]
 
     return json_response(rows)
 end
@@ -37,7 +38,7 @@ function accumulate_mv_handler(_, user::DB.User)
     v = _load_vault(user)
     _has_transactions(v) || return json_response(Dict("dates" => String[], "series" => []))
 
-    out, allDts = accumulate_mv(v; group_by = :account_name)
+    out, allDts = accumulate_mv(v; group_by = :account_group_name)
 
     dates = string.(allDts)
     cols = sort(DataFrames.names(out))   # stable stacking order

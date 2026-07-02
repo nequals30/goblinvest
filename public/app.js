@@ -10,7 +10,7 @@ const fmtUSDc = new Intl.NumberFormat("en-US", {
 // ----- Tabulator: accounts summary -----------------------------------------
 
 function buildTree(rows) {
-  const byAccount = new Map();
+  const byGroup = new Map();
   let grandTotal = 0;
 
   const maxDate = (a, b) => {
@@ -20,6 +20,7 @@ function buildTree(rows) {
   };
 
   for (const r of rows) {
+    const group = r.account_group_name ?? "Uncategorized";
     const acct = r.account_name ?? "Uncategorized";
     const asset = r.asset_name ?? "(unknown asset)";
     const mv = Number(r.market_value ?? 0);
@@ -27,16 +28,31 @@ function buildTree(rows) {
     grandTotal += mv;
     const tx = r.most_recent_trans_date ?? null;
 
-    if (!byAccount.has(acct)) {
-      byAccount.set(acct, {
+    if (!byGroup.has(group)) {
+      byGroup.set(group, {
+        name: group,
+        market_value: 0,
+        most_recent_trans_date: null,
+        _children: [],
+        _acctMap: new Map(),
+      });
+    }
+    const groupNode = byGroup.get(group);
+    groupNode.market_value += mv;
+    groupNode.most_recent_trans_date = maxDate(groupNode.most_recent_trans_date, tx);
+
+    let acctNode = groupNode._acctMap.get(acct);
+    if (!acctNode) {
+      acctNode = {
         name: acct,
         market_value: 0,
         most_recent_trans_date: null,
         _children: [],
         _assetMap: new Map(),
-      });
+      };
+      groupNode._acctMap.set(acct, acctNode);
+      groupNode._children.push(acctNode);
     }
-    const acctNode = byAccount.get(acct);
     acctNode.market_value += mv;
     acctNode.most_recent_trans_date = maxDate(acctNode.most_recent_trans_date, tx);
 
@@ -50,16 +66,19 @@ function buildTree(rows) {
     assetNode.most_recent_trans_date = maxDate(assetNode.most_recent_trans_date, tx);
   }
 
-  const accountNodes = Array.from(byAccount.values())
+  const groupNodes = Array.from(byGroup.values())
     .sort((a, b) => a.name.localeCompare(b.name));
-  const totalTx = accountNodes.reduce(
+  for (const g of groupNodes) {
+    g._children.sort((a, b) => a.name.localeCompare(b.name));
+  }
+  const totalTx = groupNodes.reduce(
     (acc, n) => maxDate(acc, n.most_recent_trans_date), null);
 
   return [{
     name: "Total",
     market_value: grandTotal,
     most_recent_trans_date: totalTx,
-    _children: accountNodes,
+    _children: groupNodes,
     _rowType: "total",
   }];
 }
@@ -76,7 +95,7 @@ async function loadAccounts() {
   accountsTable = new Tabulator("#accounts-table", {
     layout: "fitColumns",
     dataTree: true,
-    dataTreeStartExpanded: [true, false],
+    dataTreeStartExpanded: [true, true, false],
     dataTreeElementColumn: "name",
     data: buildTree(data),
     columns: [
