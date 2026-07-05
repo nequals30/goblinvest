@@ -1,0 +1,31 @@
+[project]
+name = "goblinvest-core"
+version = "0.1.0"
+description = "Personal-finance analysis on a transaction ledger rebuilt idempotently from raw statement CSVs"
+readme = "README.md"
+authors = [
+    { name = "nequals30", email = "nequals30@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "pandas>=3.0.3",
+    "sqlcipher3-binary>=0.6.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.19,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+default-groups = ["dev", "docs"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+docs = [
+    "mkdocs>=1.6.1",
+    "mkdocs-material>=9.7.6",
+    "mkdocstrings[python]>=1.0.4",
+    "ruff>=0.15.20",
+]

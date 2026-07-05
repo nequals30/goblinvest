@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+dist/
+site/
+*.db
+
+# Julia snapshot being translated; it is its own git repo and will be deleted
+# when the port is complete.
+PersonalFinance.jl/
+
+# This python port of PersonalFinance.jl is largely vibe-coded, but the original
+# julia library was written by hand.
+CLAUDE.md
+
+# The top level goblinvest project should have an uv.lock that imports this library
+uv.lock
+.python-version

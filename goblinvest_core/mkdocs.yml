@@ -1,0 +1,32 @@
+site_name: goblinvest-core
+theme:
+  name: material
+  palette:
+    scheme: slate
+    primary: teal
+  features:
+    - content.code.copy
+    - navigation.sections
+
+markdown_extensions:
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - admonition
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_source: false
+            members_order: source
+            show_root_heading: true
+            separate_signature: true
+            show_signature_annotations: true
+            filters: ["!^_"]
+
+nav:
+  - Overview: index.md
+  - API reference: api.md
