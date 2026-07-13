@@ -62,6 +62,40 @@ v.list_transactions()
 Loading the same transactions twice never double-counts, so a script that rebuilds the
 vault from all your statement CSVs can be re-run start to finish at any time.
 
+## Market prices
+
+Assets that trade publicly are priced straight from Yahoo Finance — name your assets
+with their Yahoo ticker symbols and call:
+
+```python
+v.populate_yfinance_prices(["NVDA", "VTI"])
+```
+
+Each asset's daily closing prices are fetched from its first transaction through today
+and stored in the vault; re-running just fills in the days since the last run. Two
+things make the stored prices match what your brokerage statement said *at the time*:
+
+- **Splits are un-adjusted.** Yahoo rewrites history after a stock split — after
+  NVDA's 2024 ten-for-one split, a June-2023 close of ~$420 is served as ~$42. The
+  vault stores the price as it traded that day, so shares held × price on any date
+  agrees with the statement from that date.
+- **Dividends are not deducted.** A dividend arrives in your ledger as a cash
+  transaction when you load the statement CSV, so prices must not also account for it.
+
+Read prices back as a grid — one row per date you ask for, one column per asset:
+
+```python
+v.get_asset_prices(["2026-07-03", "2026-07-04"], ["USD", "NVDA"])
+#                USD    NVDA
+# date
+# 2026-07-03    1.0  159.34
+# 2026-07-04    1.0  159.34   <- market closed: last known price carried forward
+```
+
+The base currency is always exactly 1.0. Dates with no quote (weekends, holidays)
+carry the last known price forward — pass `fill_missing_with_stale=False` to get `NaN`
+instead. Dates before an asset's first known price are `NaN` either way.
+
 A vault can also be used in a `with` block, which closes it automatically:
 
 ```python

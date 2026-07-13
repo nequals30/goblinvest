@@ -543,3 +543,168 @@ class Vault:
         ]
         df["date"] = pd.to_datetime(df["date"])
         return df
+
+    def populate_yfinance_prices(self, assets: str | Sequence[str]) -> None:
+        """Fetch daily prices from Yahoo Finance and store them in the vault.
+
+        For each asset named, daily closing prices are fetched from the date of
+        that asset's first transaction through today and stored in the vault.
+        Re-runnable like everything else: refreshing just fills in the days
+        since the last run. Requires internet access.
+
+        Stored prices match what your brokerage statement said *at the time*,
+        which means two deliberate departures from what Yahoo displays:
+
+        - **Splits are un-adjusted.** Yahoo rewrites history after a stock
+          split (after a 10-for-1 split, a pre-split $1,200 close is served as
+          $120). Those rewrites are undone, so shares held × stored price on
+          any date matches the statement from that date.
+        - **Dividends are not deducted.** A dividend lands in the ledger as a
+          cash transaction when you load the statement CSV, so prices must not
+          also account for it.
+
+        Args:
+            assets: Asset name(s) to price; each must be a ticker symbol Yahoo
+                Finance recognizes, e.g. ``"VTI"``. A single string works.
+                Names must already be registered with
+                [`add_asset`][goblinvest_core.Vault.add_asset] (matched
+                case-insensitively).
+
+        Returns:
+            Nothing.
+
+        Raises:
+            ValueError: An asset is not registered in the vault, has no
+                transactions (so there is no date to fetch from), or Yahoo
+                Finance returns no prices for it (not a real ticker, or
+                delisted).
+
+        Examples:
+            ```python
+            v.populate_yfinance_prices(["VTI", "NVDA"])
+            ```
+        """
+        if isinstance(assets, str):
+            assets = [assets]
+        assets_df = self.list_assets()
+        asset_ids = _ids_from_names(
+            assets, assets_df["asset_name"], assets_df["asset_id"], "assets"
+        )
+
+        # Imported here because yfinance takes ~1s to import; keeps
+        # `import goblinvest_core` fast for everyone not fetching prices.
+        import yfinance
+
+        for name, asset_id in zip(assets, asset_ids):
+            first_date = self._conn.execute(
+                "SELECT min(trans_date) FROM transactions WHERE asset_id = ?",
+                (asset_id,),
+            ).fetchone()[0]
+            if first_date is None:
+                raise ValueError(
+                    f"No transactions involve {name}, so there is no date to "
+                    "fetch prices from. Load its transactions first."
+                )
+
+            history = yfinance.Ticker(name).history(
+                start=first_date, interval="1d", auto_adjust=False, actions=True
+            )
+            if history.empty:
+                raise ValueError(f"Yahoo Finance returned no prices for {name}")
+
+            # Yahoo serves split-adjusted closes; multiply each close back up
+            # by the ratios of all splits dated after it to recover the price
+            # as it traded that day.
+            ratios = history["Stock Splits"].replace(0.0, 1.0)
+            unadjust = ratios.iloc[::-1].cumprod().iloc[::-1].shift(-1, fill_value=1.0)
+            prices = (history["Close"] * unadjust).dropna()
+
+            rows = zip(
+                [asset_id] * len(prices),
+                prices.index.strftime("%Y-%m-%d").tolist(),
+                prices.tolist(),
+            )
+            with self._conn:
+                self._conn.executemany(
+                    """
+                    INSERT INTO prices (asset_id, price_date, price)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT (asset_id, price_date) DO UPDATE SET
+                        price = excluded.price
+                    ;""",
+                    rows,
+                )
+
+    def get_asset_prices(
+        self,
+        dates: Sequence[datetime.date | str],
+        assets: str | Sequence[str],
+        *,
+        fill_missing_with_stale: bool = True,
+    ) -> pd.DataFrame:
+        """Return a grid of prices: one row per requested date, one column per
+        requested asset.
+
+        The base currency (asset 1) is always exactly ``1.0``. Dates with no
+        stored quote (weekends, holidays) carry the last known price forward;
+        dates before an asset's first stored price are ``NaN`` regardless.
+
+        Args:
+            dates: Dates to price, as ``datetime.date`` objects or
+                ``"YYYY-MM-DD"`` strings.
+            assets: Asset name(s) for the columns. A single string works.
+                Names must be registered in the vault (matched
+                case-insensitively).
+            fill_missing_with_stale: If ``True`` (default), a date with no
+                stored quote gets the most recent stored price before it. If
+                ``False``, only exact-date quotes are returned and everything
+                else is ``NaN``.
+
+        Returns:
+            A pandas ``DataFrame`` indexed by the requested dates, with one
+            ``float`` column per requested asset, named as you gave them, in
+            the same order. Unknown prices are ``NaN``.
+
+        Raises:
+            ValueError: An asset name is not registered in the vault.
+
+        Examples:
+            ```python
+            v.get_asset_prices(["2026-07-03", "2026-07-04"], ["USD", "NVDA"])
+            #                USD    NVDA
+            # date
+            # 2026-07-03    1.0  159.34
+            # 2026-07-04    1.0  159.34   # market closed: carried forward
+            ```
+        """
+        if isinstance(assets, str):
+            assets = [assets]
+        assets_df = self.list_assets()
+        asset_ids = _ids_from_names(
+            assets, assets_df["asset_name"], assets_df["asset_id"], "assets"
+        )
+
+        req_dates = pd.to_datetime(list(dates))
+        unique_ids = list(dict.fromkeys(asset_ids))
+        stored = self._read_df(
+            f"""
+            SELECT asset_id, price_date, price
+            FROM prices
+            WHERE asset_id IN ({",".join("?" * len(unique_ids))})
+              AND price_date <= ?
+            ;""",
+            (*unique_ids, req_dates.max().strftime("%Y-%m-%d")),
+        )
+
+        wide = stored.pivot(index="price_date", columns="asset_id", values="price")
+        wide.index = pd.to_datetime(wide.index)
+        if fill_missing_with_stale:
+            # Weave the requested dates in between the stored ones, so each
+            # inherits the last stored price at or before it.
+            wide = wide.reindex(wide.index.union(req_dates)).ffill()
+
+        out = wide.reindex(index=req_dates, columns=asset_ids).astype(float)
+        out.columns = list(assets)
+        out.index.name = "date"
+        out.iloc[:, [j for j, i in enumerate(asset_ids) if i == 1]] = 1.0
+        return out
