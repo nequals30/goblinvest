@@ -1,6 +1,8 @@
 """SQLite-backed vault of accounts, assets, transactions, and prices."""
 
+import datetime
 import sqlite3
+from collections.abc import Sequence
 from pathlib import Path
 
 import pandas as pd
@@ -68,6 +70,20 @@ def _connect(filepath: Path, password: str | None):
             + ("wrong password" if password else "the file is not a vault")
         ) from None
     return conn
+
+
+def _ids_from_names(
+    names: Sequence[str], known_names: pd.Series, known_ids: pd.Series, kind: str
+) -> list[int]:
+    """Map names to their vault ids, matching case-insensitively; any name not
+    in the vault raises."""
+    lookup = dict(zip(known_names.str.lower(), known_ids))
+    names = pd.Series(list(names), dtype=str)
+    ids = names.str.lower().map(lookup)
+    if ids.isna().any():
+        unknown = sorted(set(names[ids.isna()]))
+        raise ValueError(f"These {kind} are not registered in the vault: {', '.join(unknown)}")
+    return ids.astype(int).tolist()
 
 
 class Vault:
@@ -287,3 +303,243 @@ class Vault:
             ORDER BY account_id
             ;"""
         )
+
+    def add_asset(self, asset_name: str) -> None:
+        """Register an asset — anything you can hold an amount of.
+
+        The base currency (asset 1, named when the vault is created) is already
+        registered; add tickers, other currencies, or anything else that
+        transactions will be denominated in, e.g. ``"VTI"``, ``"EUR"``, ``"BTC"``.
+
+        Idempotent: adding the same ``asset_name`` again never creates a
+        duplicate and keeps the same ``asset_id``.
+
+        Args:
+            asset_name: Unique name for the asset, e.g. ``"VTI"``.
+
+        Returns:
+            Nothing.
+
+        Examples:
+            ```python
+            v.add_asset("VTI")
+            v.add_asset("EUR")
+            ```
+        """
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO assets (asset_name)
+                VALUES (?)
+                ON CONFLICT (asset_name) DO UPDATE SET
+                    asset_name = excluded.asset_name
+                ;""",
+                (asset_name,),
+            )
+
+    def list_assets(self) -> pd.DataFrame:
+        """Return all registered assets.
+
+        Returns:
+            A pandas ``DataFrame`` with one row per asset and columns
+            ``asset_id``, ``asset_name``, ordered by ``asset_id``. Asset 1 is
+            the vault's base currency.
+
+        Examples:
+            ```python
+            v.list_assets()
+            #    asset_id asset_name
+            # 0         1        USD
+            # 1         2        VTI
+            ```
+        """
+        return self._read_df(
+            """
+            SELECT asset_id, asset_name
+            FROM assets
+            ORDER BY asset_id
+            ;"""
+        )
+
+    def add_transactions(
+        self,
+        accounts: str | Sequence[str],
+        dates: Sequence[datetime.date | str],
+        descriptions: Sequence[str],
+        amounts: Sequence[float],
+        assets: str | Sequence[str] | None = None,
+    ) -> None:
+        """Record transactions in the ledger — one row per amount of one asset
+        moving in or out of one account.
+
+        Everything is a transaction: a $40 grocery charge is one row
+        (``-40.00`` of the base currency). A brokerage purchase is two rows on
+        the same date: the money leaving (``-1000.00``, asset ``"USD"``) and
+        the shares arriving (``+3.2``, asset ``"VTI"``). A transfer between two
+        of your accounts is two ordinary rows, one per account.
+
+        Idempotent: loading the same transactions again (for example,
+        re-running a script over a whole statement CSV) never double-counts —
+        rows that already exist in the vault are left as they are. Rows that
+        are *identical within one call* are treated as genuinely distinct
+        transactions (two identical coffee purchases on the same day) and are
+        kept apart by suffixing the repeats' descriptions with ``" (2)"``,
+        ``" (3)"``, ...
+
+        Args:
+            accounts: Account name for each transaction. A single string
+                applies to all of them. Names must already be registered with
+                [`add_account`][goblinvest_core.Vault.add_account] (matched
+                case-insensitively) — unknown names raise.
+            dates: Date of each transaction, as ``datetime.date`` objects or
+                ``"YYYY-MM-DD"`` strings.
+            descriptions: Free-form description of each transaction, e.g. the
+                statement's own text.
+            amounts: Signed amount of each transaction: positive into the
+                account, negative out of it. Denominated in the transaction's
+                asset (dollars for USD, shares for a ticker).
+            assets: Asset name for each transaction, or a single string for
+                all of them. Names must already be registered with
+                [`add_asset`][goblinvest_core.Vault.add_asset] (matched
+                case-insensitively). ``None`` (default) means the vault's base
+                currency.
+
+        Returns:
+            Nothing.
+
+        Raises:
+            ValueError: The inputs have mismatched lengths, or an account or
+                asset name is not registered in the vault.
+
+        Examples:
+            ```python
+            # two grocery charges, base currency
+            v.add_transactions(
+                "checking",
+                ["2026-07-01", "2026-07-03"],
+                ["WHOLEFDS #123", "TRADER JOE'S"],
+                [-40.00, -23.17],
+            )
+
+            # a brokerage buy: dollars out, shares in
+            v.add_transactions(
+                "brokerage",
+                ["2026-07-02", "2026-07-02"],
+                ["buy VTI", "buy VTI"],
+                [-1000.00, 3.2],
+                assets=["USD", "VTI"],
+            )
+            ```
+        """
+        n = len(dates)
+        if isinstance(accounts, str):
+            accounts = [accounts] * n
+        if isinstance(assets, str):
+            assets = [assets] * n
+
+        lengths = {
+            "accounts": len(accounts),
+            "dates": n,
+            "descriptions": len(descriptions),
+            "amounts": len(amounts),
+        }
+        if assets is not None:
+            lengths["assets"] = len(assets)
+        if len(set(lengths.values())) > 1:
+            raise ValueError(f"Inputs have mismatched lengths: {lengths}")
+
+        accounts_df = self.list_accounts()
+        account_ids = _ids_from_names(
+            accounts, accounts_df["account_name"], accounts_df["account_id"], "accounts"
+        )
+        if assets is None:
+            asset_ids = [1] * n
+        else:
+            assets_df = self.list_assets()
+            asset_ids = _ids_from_names(
+                assets, assets_df["asset_name"], assets_df["asset_id"], "assets"
+            )
+
+        df = pd.DataFrame(
+            {
+                "account_id": account_ids,
+                "date": pd.to_datetime(list(dates)).strftime("%Y-%m-%d"),
+                "description": pd.Series(list(descriptions), dtype=str),
+                "amount": pd.Series(list(amounts), dtype=float),
+                "asset_id": asset_ids,
+            }
+        )
+
+        # Repeats of an identical row within this call get " (2)", " (3)", ...
+        # appended to their descriptions so the ledger keeps them all.
+        occurrence = df.groupby(list(df.columns)).cumcount()
+        df["description"] = df["description"].where(
+            occurrence == 0,
+            df["description"] + " (" + (occurrence + 1).astype(str) + ")",
+        )
+
+        rows = zip(
+            df["account_id"].tolist(),
+            df["date"].tolist(),
+            df["description"].tolist(),
+            df["amount"].tolist(),
+            df["asset_id"].tolist(),
+        )
+        with self._conn:
+            self._conn.executemany(
+                """
+                INSERT INTO transactions (account_id, trans_date, trans_desc, amount, asset_id)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (account_id, trans_date, trans_desc, amount, asset_id)
+                DO UPDATE SET amount = excluded.amount
+                ;""",
+                rows,
+            )
+
+    def list_transactions(self) -> pd.DataFrame:
+        """Return the whole ledger, with account and asset details joined in.
+
+        Returns:
+            A pandas ``DataFrame`` with one row per transaction, sorted by
+            ``date`` then ``account_name``, with columns:
+
+            - ``transaction_id`` — unique id of the transaction
+            - ``account_name`` — account the transaction belongs to
+            - ``date`` — transaction date (pandas datetime)
+            - ``description`` — free-form description
+            - ``amount`` — signed amount, in the transaction's asset
+            - ``asset`` — name of the asset the amount is denominated in
+            - ``ownership_share`` — your fraction of the account
+            - ``account_group_name`` — the account's group label
+
+        Examples:
+            ```python
+            v.list_transactions()
+            #    transaction_id account_name       date    description   amount asset  ownership_share account_group_name
+            # 0               1     checking 2026-07-01  WHOLEFDS #123   -40.00   USD              1.0               cash
+            # 1               2    brokerage 2026-07-02        buy VTI -1000.00   USD              1.0        investments
+            # 2               3    brokerage 2026-07-02        buy VTI     3.20   VTI              1.0        investments
+            ```
+        """
+        df = self._read_df(
+            """
+            SELECT trans_id, account_name, trans_date, trans_desc, amount,
+                   asset_name, ownership_share, account_group_name
+            FROM transactions
+            LEFT JOIN accounts ON accounts.account_id = transactions.account_id
+            LEFT JOIN assets ON assets.asset_id = transactions.asset_id
+            ORDER BY trans_date, account_name
+            ;"""
+        )
+        df.columns = [
+            "transaction_id",
+            "account_name",
+            "date",
+            "description",
+            "amount",
+            "asset",
+            "ownership_share",
+            "account_group_name",
+        ]
+        df["date"] = pd.to_datetime(df["date"])
+        return df

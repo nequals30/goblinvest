@@ -35,6 +35,33 @@ v.list_accounts()
 v.close()
 ```
 
+## Recording transactions
+
+Every movement of money (or shares, or anything else) is a transaction: a signed
+amount of one asset, in one account, on one date. A brokerage purchase is two rows —
+the dollars leaving and the shares arriving:
+
+```python
+v.add_account("brokerage", account_group_name="investments")
+v.add_asset("VTI")
+
+v.add_transactions(
+    "brokerage",                        # one account name applies to all rows
+    ["2026-07-02", "2026-07-02"],
+    ["buy VTI", "buy VTI"],
+    [-1000.00, 3.2],
+    assets=["USD", "VTI"],              # omit for the base currency
+)
+
+v.list_transactions()
+#    transaction_id account_name       date description   amount asset  ownership_share account_group_name
+# 0               1    brokerage 2026-07-02     buy VTI -1000.00   USD              1.0        investments
+# 1               2    brokerage 2026-07-02     buy VTI     3.20   VTI              1.0        investments
+```
+
+Loading the same transactions twice never double-counts, so a script that rebuilds the
+vault from all your statement CSVs can be re-run start to finish at any time.
+
 A vault can also be used in a `with` block, which closes it automatically:
 
 ```python
