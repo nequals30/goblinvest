@@ -708,3 +708,179 @@ class Vault:
         out.index.name = "date"
         out.iloc[:, [j for j, i in enumerate(asset_ids) if i == 1]] = 1.0
         return out
+
+    def accumulate_mv(self, group_by: str | None = None) -> pd.DataFrame:
+        """Compute market value over time — what everything was worth, day by day.
+
+        For every day from your first transaction through today: the units
+        held that day (accumulated from the ledger, weighted by ownership
+        share) times that day's price, in the base currency. Days without a
+        stored quote use the last known price, so the series runs through
+        weekends and up to the present.
+
+        Total net worth is the row sum: ``v.accumulate_mv().sum(axis=1)``.
+
+        Args:
+            group_by: How to bucket the columns:
+
+                - ``None`` (default) — one column per account/asset pair,
+                  named ``"account::asset"``
+                - ``"account_name"`` — one column per account
+                - ``"asset"`` — one column per asset
+                - ``"account_group_name"`` — one column per account group
+
+        Returns:
+            A pandas ``DataFrame`` with one row per calendar day (date
+            index) and ``float`` market values in the base currency. A
+            position you don't hold is exactly ``0.0``. A cell is ``NaN``
+            when the asset *was* held that day but has no stored price at
+            all — run
+            [`populate_yfinance_prices`][goblinvest_core.Vault.populate_yfinance_prices]
+            for it. (Inside a ``group_by`` bucket, such unpriced holdings
+            count as 0.) Empty on an empty vault.
+
+        Raises:
+            ValueError: ``group_by`` is not one of the values above.
+
+        Examples:
+            ```python
+            v.accumulate_mv()
+            #             checking::USD  brokerage::USD  brokerage::NVDA
+            # date
+            # 2026-07-01        1000.00         -240.00           240.00
+            # 2026-07-02        1000.00         -240.00           250.00
+
+            v.accumulate_mv(group_by="account_group_name")
+            #                cash  investments
+            # date
+            # 2026-07-01  1000.00         0.00
+            # 2026-07-02  1000.00        10.00
+            ```
+        """
+        valid = (None, "account_name", "asset", "account_group_name")
+        if group_by not in valid:
+            raise ValueError(f"group_by must be one of {valid}, got {group_by!r}")
+
+        ledger = self.list_transactions()
+        if ledger.empty:
+            return pd.DataFrame(index=pd.DatetimeIndex([], name="date"))
+
+        today = pd.Timestamp.today().normalize()
+        all_dates = pd.date_range(ledger["date"].min(), max(today, ledger["date"].max()))
+
+        # Daily grid of units held, one column per (account, asset). Rounding
+        # kills float dust so a closed position is exactly 0, while preserving
+        # any real fractional share count.
+        units = (
+            ledger.assign(_weighted=ledger["amount"] * ledger["ownership_share"])
+            .pivot_table(
+                index="date", columns=["account_name", "asset"], values="_weighted", aggfunc="sum"
+            )
+            .reindex(all_dates)
+            .fillna(0.0)
+            .cumsum()
+            .round(8)
+        )
+
+        prices = self.get_asset_prices(all_dates, list(units.columns.get_level_values("asset")))
+        prices.columns = units.columns
+        # Zero units are worth exactly 0 even when the price is unknown; NaN
+        # is reserved for "held but never priced".
+        mv = (units * prices).where(units != 0, 0.0).round(2)
+
+        if group_by is None:
+            mv.columns = [f"{account}::{asset}" for account, asset in mv.columns]
+        else:
+            if group_by == "account_name":
+                keys = list(mv.columns.get_level_values("account_name"))
+            elif group_by == "asset":
+                keys = list(mv.columns.get_level_values("asset"))
+            else:
+                accounts_df = self.list_accounts()
+                group_of = dict(
+                    zip(
+                        accounts_df["account_name"],
+                        accounts_df["account_group_name"].fillna("UNCLASSIFIED"),
+                    )
+                )
+                keys = [group_of[a] for a in mv.columns.get_level_values("account_name")]
+            mv = mv.T.groupby(keys, sort=False).sum().T
+
+        mv.index.name = "date"
+        mv.columns.name = None
+        return mv
+
+    def summarize_accounts(self) -> pd.DataFrame:
+        """Summarize what you hold right now: one row per account/asset pair
+        with a non-zero balance, valued at the latest known price.
+
+        Positions of less than 0.01 units (closed positions, rounding dust)
+        are dropped.
+
+        Returns:
+            A pandas ``DataFrame`` sorted by account then asset, with columns:
+
+            - ``account_name``, ``account_group_name`` — as registered
+            - ``asset`` — what is held
+            - ``units`` — how much of it: shares for a ticker, dollars for cash
+            - ``price`` — latest known price; always ``1.0`` for the base
+              currency, ``NaN`` if the asset has never been priced
+            - ``price_date`` — the date that price is from, so a stale quote
+              is visible (``NaT`` for the base currency)
+            - ``ownership_share`` — your fraction of the account
+            - ``market_value`` — units × price × ownership share
+            - ``last_transaction`` — date of the account/asset's newest
+              transaction
+
+            Empty on an empty vault.
+
+        Examples:
+            ```python
+            v.summarize_accounts()
+            #   account_name account_group_name asset    units  price price_date  ownership_share  market_value last_transaction
+            # 0    brokerage        investments  NVDA      2.0  125.0 2026-07-10              1.0         250.0       2026-07-02
+            # 1    brokerage        investments   USD   -240.0    1.0        NaT              1.0        -240.0       2026-07-02
+            # 2     checking               cash   USD  1000.00    1.0        NaT              1.0        1000.0       2026-07-01
+            ```
+        """
+        columns = [
+            "account_name",
+            "account_group_name",
+            "asset",
+            "units",
+            "price",
+            "price_date",
+            "ownership_share",
+            "market_value",
+            "last_transaction",
+        ]
+        ledger = self.list_transactions()
+        held = (
+            ledger.groupby(["account_name", "account_group_name", "asset"], dropna=False, sort=False)
+            .agg(
+                units=("amount", "sum"),
+                ownership_share=("ownership_share", "first"),
+                last_transaction=("date", "max"),
+            )
+            .reset_index()
+        )
+        held["units"] = held["units"].round(8)
+        held = held[held["units"].abs() >= 0.01]
+        if held.empty:
+            return pd.DataFrame(columns=columns)
+
+        today = pd.Timestamp.today().normalize()
+        held["price"] = self.get_asset_prices([today], held["asset"].tolist()).iloc[0].to_numpy()
+
+        assets_df = self.list_assets()
+        asset_ids = held["asset"].map(dict(zip(assets_df["asset_name"], assets_df["asset_id"])))
+        latest = self._read_df(
+            "SELECT asset_id, MAX(price_date) AS price_date FROM prices GROUP BY asset_id;"
+        )
+        held["price_date"] = pd.to_datetime(
+            asset_ids.map(dict(zip(latest["asset_id"], latest["price_date"])))
+        )
+        held.loc[asset_ids == 1, "price_date"] = pd.NaT
+
+        held["market_value"] = (held["units"] * held["price"] * held["ownership_share"]).round(2)
+        return held.sort_values(["account_name", "asset"]).reset_index(drop=True)[columns]

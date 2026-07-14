@@ -96,6 +96,39 @@ The base currency is always exactly 1.0. Dates with no quote (weekends, holidays
 carry the last known price forward — pass `fill_missing_with_stale=False` to get `NaN`
 instead. Dates before an asset's first known price are `NaN` either way.
 
+## Balances and net-worth history
+
+`summarize_accounts` is the "what do I hold right now" view — every non-zero position,
+valued at its latest known price, with the price's date shown so a stale quote is
+visible:
+
+```python
+v.summarize_accounts()
+#   account_name account_group_name asset    units  price price_date  ownership_share  market_value last_transaction
+# 0    brokerage        investments  NVDA      3.2  159.3 2026-07-10              1.0        509.76       2026-07-02
+# 1    brokerage        investments   USD  -1000.0    1.0        NaT              1.0      -1000.00       2026-07-02
+# 2     checking               cash   USD   3936.8    1.0        NaT              1.0       3936.80       2026-07-03
+```
+
+`accumulate_mv` is the same idea through time: for every day from your first
+transaction to today, the market value of each position — units held that day times
+that day's price. Total net worth is the row sum:
+
+```python
+mv = v.accumulate_mv()                 # one column per account::asset pair
+mv.sum(axis=1)                         # net worth, daily
+
+v.accumulate_mv(group_by="account_group_name")
+#                cash  investments
+# date
+# 2026-07-02  3976.80      -490.24
+# 2026-07-03  3936.80      -493.13
+```
+
+`group_by` buckets the columns by `"account_name"`, `"asset"`, or
+`"account_group_name"`. A held asset with no stored price shows as `NaN` — run
+`populate_yfinance_prices` for it.
+
 A vault can also be used in a `with` block, which closes it automatically:
 
 ```python

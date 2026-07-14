@@ -425,6 +425,152 @@ class TestPrices:
             vault.get_asset_prices(["2024-06-07"], "DOGE")
 
 
+class TestAnalytics:
+    @pytest.fixture
+    def vault(self, filepath):
+        with Vault.create(filepath) as v:
+            v.add_account("checking", account_group_name="cash")
+            v.add_account("brokerage", account_group_name="investments")
+            v.add_asset("NVDA")
+            v.add_transactions(
+                ["checking", "brokerage", "brokerage"],
+                ["2024-06-03", "2024-06-05", "2024-06-05"],
+                ["paycheck", "buy NVDA", "buy NVDA"],
+                [1000.0, -240.0, 2.0],
+                assets=["USD", "USD", "NVDA"],
+            )
+            with v._conn:  # NVDA is asset 2
+                v._conn.executemany(
+                    "INSERT INTO prices (asset_id, price_date, price) VALUES (?, ?, ?)",
+                    [(2, "2024-06-05", 120.0), (2, "2024-06-07", 125.0)],
+                )
+            yield v
+
+    # ---- accumulate_mv ----------------------------------------------------
+
+    def test_ungrouped_daily_market_values(self, vault):
+        out = vault.accumulate_mv()
+
+        assert set(out.columns) == {"checking::USD", "brokerage::USD", "brokerage::NVDA"}
+        assert out.index[0] == pd.Timestamp("2024-06-03")
+        assert out.index[-1] == pd.Timestamp.today().normalize()  # runs to today
+
+        assert out.loc["2024-06-03", "checking::USD"] == 1000.0
+        assert out.loc["2024-06-04", "checking::USD"] == 1000.0  # carried between transactions
+        assert out.loc["2024-06-04", "brokerage::NVDA"] == 0.0  # nothing held yet
+        assert out.loc["2024-06-05", "brokerage::USD"] == -240.0
+        assert out.loc["2024-06-05", "brokerage::NVDA"] == 240.0  # 2 shares x 120
+        assert out.loc["2024-06-07", "brokerage::NVDA"] == 250.0  # 2 shares x 125
+        assert out.loc["2024-06-08", "brokerage::NVDA"] == 250.0  # stale price on Saturday
+        assert out.iloc[-1]["brokerage::NVDA"] == 250.0  # last known price through today
+
+    def test_group_by_account_name(self, vault):
+        out = vault.accumulate_mv(group_by="account_name")
+        assert set(out.columns) == {"checking", "brokerage"}
+        assert out.loc["2024-06-05", "brokerage"] == 0.0  # -240 cash + 240 shares
+        assert out.loc["2024-06-07", "brokerage"] == 10.0
+
+    def test_group_by_asset(self, vault):
+        out = vault.accumulate_mv(group_by="asset")
+        assert set(out.columns) == {"USD", "NVDA"}
+        assert out.loc["2024-06-05", "USD"] == 760.0
+        assert out.loc["2024-06-05", "NVDA"] == 240.0
+
+    def test_group_by_account_group_name(self, vault):
+        out = vault.accumulate_mv(group_by="account_group_name")
+        assert set(out.columns) == {"cash", "investments"}
+        assert out.loc["2024-06-07", "cash"] == 1000.0
+        assert out.loc["2024-06-07", "investments"] == 10.0
+
+    def test_invalid_group_by_raises(self, vault):
+        with pytest.raises(ValueError, match="group_by"):
+            vault.accumulate_mv(group_by="asset_class")
+
+    def test_ownership_share_weights_values(self, vault):
+        vault.add_account("joint", ownership_share=0.5, account_group_name="cash")
+        vault.add_transactions("joint", ["2024-06-03"], ["deposit"], [1000.0])
+
+        out = vault.accumulate_mv()
+        assert out.loc["2024-06-03", "joint::USD"] == 500.0
+
+    def test_closed_position_is_exactly_zero(self, vault):
+        # 0.3 - 0.1 - 0.2 leaves float dust of ~1e-17; the vault must report 0.
+        vault.add_transactions(
+            "checking",
+            ["2024-06-10"] * 3,
+            ["a", "b", "c"],
+            [0.3, -0.1, -0.2],
+        )
+        out = vault.accumulate_mv()
+        assert out.loc["2024-06-11", "checking::USD"] == 1000.0
+
+    def test_held_but_never_priced_asset_is_nan(self, vault):
+        vault.add_asset("BTC")
+        vault.add_transactions("brokerage", ["2024-06-05"], ["buy BTC"], [1.0], assets="BTC")
+
+        out = vault.accumulate_mv()
+        assert pd.isna(out.loc["2024-06-05", "brokerage::BTC"])
+        assert out.loc["2024-06-04", "brokerage::BTC"] == 0.0  # not held yet: 0, not NaN
+
+    def test_accumulate_mv_empty_vault(self, filepath):
+        with Vault.create(filepath) as v:
+            out = v.accumulate_mv()
+            assert len(out) == 0
+
+    # ---- summarize_accounts -----------------------------------------------
+
+    def test_summary_rows_and_columns(self, vault):
+        out = vault.summarize_accounts()
+
+        assert list(out.columns) == [
+            "account_name",
+            "account_group_name",
+            "asset",
+            "units",
+            "price",
+            "price_date",
+            "ownership_share",
+            "market_value",
+            "last_transaction",
+        ]
+        # sorted by account then asset
+        assert out["account_name"].tolist() == ["brokerage", "brokerage", "checking"]
+        assert out["asset"].tolist() == ["NVDA", "USD", "USD"]
+        assert out["units"].tolist() == [2.0, -240.0, 1000.0]
+        assert out["price"].tolist() == [125.0, 1.0, 1.0]  # NVDA at its latest stored price
+        assert out["market_value"].tolist() == [250.0, -240.0, 1000.0]
+        assert out["last_transaction"].tolist() == pd.to_datetime(
+            ["2024-06-05", "2024-06-05", "2024-06-03"]
+        ).tolist()
+
+    def test_summary_price_date_shows_staleness(self, vault):
+        out = vault.summarize_accounts().set_index("asset")
+        assert out.loc["NVDA", "price_date"] == pd.Timestamp("2024-06-07")
+        assert pd.isna(out.loc[["USD"], "price_date"]).all()  # base currency has no quote date
+
+    def test_summary_drops_dust_positions(self, vault):
+        vault.add_account("dusty")
+        vault.add_transactions("dusty", ["2024-06-10"], ["leftover"], [0.005])
+
+        assert "dusty" not in vault.summarize_accounts()["account_name"].tolist()
+
+    def test_summary_empty_vault(self, filepath):
+        with Vault.create(filepath) as v:
+            out = v.summarize_accounts()
+            assert len(out) == 0
+            assert "market_value" in out.columns
+
+    def test_summary_matches_last_row_of_accumulate_mv(self, vault):
+        vault.add_account("joint", ownership_share=0.5, account_group_name="cash")
+        vault.add_transactions("joint", ["2024-06-03"], ["deposit"], [1000.0])
+
+        latest_mv = vault.accumulate_mv().iloc[-1]
+        for row in vault.summarize_accounts().itertuples():
+            assert latest_mv[f"{row.account_name}::{row.asset}"] == pytest.approx(
+                row.market_value
+            )
+
+
 class TestEncrypted:
     def test_roundtrip_with_prompts(self, filepath, monkeypatch):
         _typed(monkeypatch, "hunter2", "hunter2")  # create: enter + confirm
