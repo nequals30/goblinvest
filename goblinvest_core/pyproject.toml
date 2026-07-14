@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "cryptography>=49.0.0",
     "pandas>=3.0.3",
     "sqlcipher3-binary>=0.6.0",
     "yfinance>=1.5.1",

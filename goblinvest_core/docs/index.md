@@ -165,4 +165,55 @@ remembered password immediately.
 Leave `encrypted` off and the vault is a plain SQLite file, readable by any SQLite
 tool, and never involves a password or a prompt.
 
+## Encrypted statement CSVs
+
+The raw statement CSVs are the source of truth, which makes them the most sensitive
+files you have — worth keeping in a (private) git repository, and worth encrypting at
+rest. Encrypt each statement once, then read it forever without touching its bytes:
+
+```python
+import pandas as pd
+from goblinvest_core import encrypt_file, read_encrypted_file
+
+encrypt_file("statements/chase_2026-06.csv")        # once, when the statement arrives
+
+df = pd.read_csv(read_encrypted_file("statements/chase_2026-06.csv"))   # ever after
+```
+
+`read_encrypted_file` decrypts into memory only — the file on disk never changes, so
+git never sees phantom modifications, no matter how many times your rebuild script
+runs.
+
+Encrypted files are built to be hard to break by accident. They are stored as plain
+text, so the small liberties other programs take with text files — an editor adding a
+newline when you save, git changing line endings between operating systems — do no
+harm. And if a file really is damaged, or you type the wrong password, you get a
+clear error instead of garbage rows loading into your vault.
+
+It is the same password as the vault, remembered for the same 15 minutes: one
+`ask_password()` covers loading a hundred statements.
+
+Need to fix a bad row? `decrypt_file` writes the plaintext back in place — edit it,
+then `encrypt_file` again:
+
+```python
+from goblinvest_core import decrypt_file
+
+decrypt_file("statements/chase_2026-06.csv")
+# ...fix the row in your editor...
+encrypt_file("statements/chase_2026-06.csv")
+```
+
+??? note "Technical details"
+
+    An encrypted file is a `GVENC1` header line followed by the encrypted payload as
+    base64 text (like PGP's "ASCII armor"); reading strips all whitespace before
+    decoding, which is why editors and line-ending conversions can't hurt it. The
+    payload is a 16-byte salt, a 12-byte nonce, and AES-256-GCM ciphertext — GCM's
+    built-in integrity tag is what turns a wrong password or a damaged file into a
+    clean error. The key is derived from your password with PBKDF2-HMAC-SHA256
+    (600,000 iterations) and cached in memory; files encrypted in the same session
+    share one salt, so a script reading hundreds of statements pays the deliberately
+    slow key derivation once, not per file.
+
 See the [API reference](api.md) for every function, its inputs, and its outputs.
