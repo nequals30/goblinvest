@@ -16,3 +16,7 @@ CLAUDE.md
 # The top level goblinvest project should have an uv.lock that imports this library
 uv.lock
 .python-version
+
+# Demo statement CSVs written by examples/load_transactions/generate_fake_data.py;
+# regenerable from a fixed seed, so they stay out of git.
+examples/load_transactions/data/
