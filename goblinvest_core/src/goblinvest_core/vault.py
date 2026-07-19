@@ -823,14 +823,11 @@ class Vault:
             - ``account_name``, ``account_group_name`` — as registered
             - ``asset`` — what is held
             - ``units`` — how much of it: shares for a ticker, dollars for cash
-            - ``price`` — latest known price; always ``1.0`` for the base
-              currency, ``NaN`` if the asset has never been priced
-            - ``price_date`` — the date that price is from, so a stale quote
-              is visible (``NaT`` for the base currency)
+            - ``price`` — latest known price: ``1.0`` for the base currency, ``NaN`` if never priced
+            - ``price_date`` — date of that price (``NaT`` for the base currency), exposing stale quotes
             - ``ownership_share`` — your fraction of the account
             - ``market_value`` — units × price × ownership share
-            - ``last_transaction`` — date of the account/asset's newest
-              transaction
+            - ``last_transaction`` — date of the account/asset's newest transaction
 
             Empty on an empty vault.
 
@@ -856,7 +853,9 @@ class Vault:
         ]
         ledger = self.list_transactions()
         held = (
-            ledger.groupby(["account_name", "account_group_name", "asset"], dropna=False, sort=False)
+            ledger.groupby(
+                ["account_name", "account_group_name", "asset"], dropna=False, sort=False
+            )
             .agg(
                 units=("amount", "sum"),
                 ownership_share=("ownership_share", "first"),

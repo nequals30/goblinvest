@@ -98,8 +98,6 @@ def _get_key(salt: bytes | None, *, confirm: bool) -> tuple[bytes, bytes]:
         from cryptography.hazmat.primitives.hashes import SHA256
         from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-        kdf = PBKDF2HMAC(
-            algorithm=SHA256(), length=32, salt=salt, iterations=_PBKDF2_ITERATIONS
-        )
+        kdf = PBKDF2HMAC(algorithm=SHA256(), length=32, salt=salt, iterations=_PBKDF2_ITERATIONS)
         keys[salt] = kdf.derive(password.encode())
     return salt, keys[salt]

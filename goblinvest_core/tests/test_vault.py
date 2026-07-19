@@ -39,14 +39,9 @@ def test_create_builds_julia_compatible_schema(filepath):
 
     # Read the file back with plain stdlib sqlite3, as the Julia package would.
     conn = sqlite3.connect(filepath)
-    tables = {
-        r[0]
-        for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    }
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"transactions", "accounts", "assets", "prices"} <= tables
-    assert conn.execute("SELECT asset_id, asset_name FROM assets").fetchall() == [
-        (1, "USD")
-    ]
+    assert conn.execute("SELECT asset_id, asset_name FROM assets").fetchall() == [(1, "USD")]
     conn.close()
 
 
@@ -177,9 +172,10 @@ class TestTransactions:
             "account_group_name",
         ]
         # sorted by date, then account_name
-        assert df["date"].tolist() == pd.to_datetime(
-            ["2026-07-01", "2026-07-01", "2026-07-03"]
-        ).tolist()
+        assert (
+            df["date"].tolist()
+            == pd.to_datetime(["2026-07-01", "2026-07-01", "2026-07-03"]).tolist()
+        )
         assert df["account_name"].tolist() == ["brokerage", "brokerage", "checking"]
         assert df["amount"].tolist() == [-1000.00, 3.2, -40.00]
         assert df["asset"].tolist() == ["USD", "VTI", "USD"]
@@ -539,9 +535,10 @@ class TestAnalytics:
         assert out["units"].tolist() == [2.0, -240.0, 1000.0]
         assert out["price"].tolist() == [125.0, 1.0, 1.0]  # NVDA at its latest stored price
         assert out["market_value"].tolist() == [250.0, -240.0, 1000.0]
-        assert out["last_transaction"].tolist() == pd.to_datetime(
-            ["2024-06-05", "2024-06-05", "2024-06-03"]
-        ).tolist()
+        assert (
+            out["last_transaction"].tolist()
+            == pd.to_datetime(["2024-06-05", "2024-06-05", "2024-06-03"]).tolist()
+        )
 
     def test_summary_price_date_shows_staleness(self, vault):
         out = vault.summarize_accounts().set_index("asset")
@@ -566,9 +563,7 @@ class TestAnalytics:
 
         latest_mv = vault.accumulate_mv().iloc[-1]
         for row in vault.summarize_accounts().itertuples():
-            assert latest_mv[f"{row.account_name}::{row.asset}"] == pytest.approx(
-                row.market_value
-            )
+            assert latest_mv[f"{row.account_name}::{row.asset}"] == pytest.approx(row.market_value)
 
 
 class TestEncrypted:

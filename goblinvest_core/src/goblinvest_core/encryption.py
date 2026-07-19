@@ -75,10 +75,7 @@ def encrypt_file(filepath: str | Path) -> None:
     nonce = os.urandom(_NONCE_LEN)
     ciphertext = AESGCM(key).encrypt(nonce, plaintext, None)
     armored = (
-        _MAGIC
-        + str(_VERSION).encode()
-        + b"\n"
-        + base64.encodebytes(salt + nonce + ciphertext)
+        _MAGIC + str(_VERSION).encode() + b"\n" + base64.encodebytes(salt + nonce + ciphertext)
     )
     _write_atomically(filepath, armored)
 

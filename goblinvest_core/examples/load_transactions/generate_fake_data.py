@@ -56,9 +56,7 @@ def approx_price(ticker: str, dt: datetime.date) -> float:
 
 
 def months_in_range():
-    return [
-        (y, m) for y in YEARS for m in range(1, 13) if datetime.date(y, m, 1) <= END_DATE
-    ]
+    return [(y, m) for y in YEARS for m in range(1, 13) if datetime.date(y, m, 1) <= END_DATE]
 
 
 # Previous calendar month, used to pay a credit-card statement one month in
@@ -199,9 +197,7 @@ def gen_joint():
             rows.append(
                 {"date": dt, "description": "Contribution from checking", "amount": 1400.00}
             )
-            rows.append(
-                {"date": dt, "description": "Contribution from partner", "amount": 1400.00}
-            )
+            rows.append({"date": dt, "description": "Contribution from partner", "amount": 1400.00})
 
         # Utilities on the 10th.
         dt = datetime.date(y, m, 10)

@@ -216,4 +216,5 @@ encrypt_file("statements/chase_2026-06.csv")
     share one salt, so a script reading hundreds of statements pays the deliberately
     slow key derivation once, not per file.
 
-See the [API reference](api.md) for every function, its inputs, and its outputs.
+See the [examples](examples.md) for a complete statements-to-net-worth script, and the
+[API reference](api.md) for every function, its inputs, and its outputs.
