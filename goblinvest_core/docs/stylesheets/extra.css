@@ -1,0 +1,18 @@
+/* Rules between sections and between documented functions, so a long page is
+   easier to scan and scroll through. */
+
+.md-typeset h2 {
+  border-top: 1px solid var(--md-default-fg-color--lightest);
+  padding-top: 1.2em;
+}
+
+.md-typeset h3.doc-heading {
+  border-top: 1px solid var(--md-default-fg-color--lightest);
+  padding-top: 1.2em;
+}
+
+/* The first heading on a page has nothing above it to divide from. */
+.md-typeset h1 + h2 {
+  border-top: none;
+  padding-top: 0;
+}

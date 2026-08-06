@@ -168,9 +168,11 @@ class TestTransactions:
             "description",
             "amount",
             "asset",
+            "category",
             "ownership_share",
             "account_group_name",
         ]
+        assert df["category"].tolist() == ["unclassified"] * 3
         # sorted by date, then account_name
         assert (
             df["date"].tolist()

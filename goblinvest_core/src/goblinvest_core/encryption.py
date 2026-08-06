@@ -37,13 +37,12 @@ def encrypt_file(filepath: str | Path) -> None:
     with [`read_encrypted_file`][goblinvest_core.read_encrypted_file]. It is
     the same password the vault uses, remembered for 15 minutes by
     [`ask_password`][goblinvest_core.ask_password]; if none is remembered you
-    are prompted (and asked to confirm, since a typo here would encrypt the
-    file under a password you don't know).
+    are prompted, and asked to confirm, since a typo would encrypt the file
+    under a password you don't know.
 
-    The encrypted file is stored as plain text, so the small liberties other
-    programs take with text files — an editor adding a newline when you
-    save, git converting line endings between operating systems — do it no
-    harm.
+    The encrypted file is stored as plain text, so the liberties other
+    programs take with text files — an editor adding a newline, git converting
+    line endings between operating systems — do it no harm.
 
     Args:
         filepath: File to encrypt, e.g. ``"statements/chase_2026-06.csv"``.
@@ -67,17 +66,18 @@ def encrypt_file(filepath: str | Path) -> None:
     plaintext = filepath.read_bytes()
     if plaintext.startswith(_MAGIC):
         raise ValueError(f"{filepath} is already encrypted")
+    _write_atomically(filepath, _armor_bytes(plaintext, confirm=True))
 
-    salt, key = _get_key(None, confirm=True)
+
+def _armor_bytes(plaintext: bytes, *, confirm: bool) -> bytes:
+    """Encrypt bytes into the armored text format (in memory, no file I/O)."""
+    salt, key = _get_key(None, confirm=confirm)
     # Imported here to keep `import goblinvest_core` fast.
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
     nonce = os.urandom(_NONCE_LEN)
     ciphertext = AESGCM(key).encrypt(nonce, plaintext, None)
-    armored = (
-        _MAGIC + str(_VERSION).encode() + b"\n" + base64.encodebytes(salt + nonce + ciphertext)
-    )
-    _write_atomically(filepath, armored)
+    return _MAGIC + str(_VERSION).encode() + b"\n" + base64.encodebytes(salt + nonce + ciphertext)
 
 
 def _decrypt(filepath: str | Path) -> bytes:
@@ -130,12 +130,11 @@ def read_encrypted_file(filepath: str | Path) -> io.BytesIO:
     are read. The password comes from the same 15-minute memory as the
     vault's; you are prompted if none is remembered.
 
-    Reading is forgiving about form and strict about content. Cosmetic
-    changes to the file (an added newline, converted line endings) are
-    ignored entirely. But the content itself is verified: a wrong password
-    or a genuinely damaged file fails with a clear error rather than
-    yielding garbage rows. After a failure the remembered password is
-    forgotten, so the next attempt prompts again.
+    Cosmetic changes to the file (an added newline, converted line endings)
+    are ignored, but the contents are verified: a wrong password or a damaged
+    file fails with a clear error rather than yielding garbage rows. After a
+    failure the remembered password is forgotten, so the next attempt prompts
+    again.
 
     Args:
         filepath: An encrypted file, e.g. ``"statements/chase_2026-06.csv"``.
@@ -165,7 +164,7 @@ def read_encrypted_file(filepath: str | Path) -> io.BytesIO:
 def decrypt_file(filepath: str | Path) -> None:
     """Decrypt a file in place, writing the plaintext back to disk.
 
-    The escape hatch for editing: decrypt, fix the CSV, then
+    For editing a file: decrypt it, fix the CSV, then
     [`encrypt_file`][goblinvest_core.encrypt_file] it again. For *loading*
     statements, use
     [`read_encrypted_file`][goblinvest_core.read_encrypted_file] instead — it

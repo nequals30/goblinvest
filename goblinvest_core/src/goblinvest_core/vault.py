@@ -1,6 +1,7 @@
 """SQLite-backed vault of accounts, assets, transactions, and prices."""
 
 import datetime
+import os
 import sqlite3
 from collections.abc import Sequence
 from pathlib import Path
@@ -8,10 +9,32 @@ from pathlib import Path
 import pandas as pd
 
 from goblinvest_core._password import _get_password, forget_password
+from goblinvest_core.adjustments import (
+    _CATEGORIES_FILE,
+    _EXCEPTIONS_FILE,
+    _RULES_FILE,
+    _ensure_files,
+    _folder_is_encrypted,
+    _write_file,
+)
+from goblinvest_core.categories import (
+    UNCLASSIFIED,
+    _canonical_categories,
+    _normalize_desc,
+    _read_category_file,
+    _resolve_categories,
+    _strip_dup_suffix,
+)
 
 # The first 16 bytes of every unencrypted SQLite file; anything else is
 # assumed to be a SQLCipher-encrypted vault.
 _SQLITE_MAGIC = b"SQLite format 3\x00"
+
+_SETTINGS_TABLE = """
+    CREATE TABLE IF NOT EXISTS settings (
+        key TEXT NOT NULL PRIMARY KEY,
+        value TEXT
+    );"""
 
 _SCHEMA = (
     """
@@ -22,6 +45,7 @@ _SCHEMA = (
         trans_desc TEXT NOT NULL,
         amount DECIMAL(7,5) NOT NULL,
         asset_id INTEGER NOT NULL,
+        category_id INTEGER,
         UNIQUE(account_id, trans_date, trans_desc, amount, asset_id)
     );""",
     """
@@ -43,7 +67,17 @@ _SCHEMA = (
         price DECIMAL(7,2) NOT NULL,
         UNIQUE(asset_id, price_date)
     );""",
+    """
+    CREATE TABLE IF NOT EXISTS categories (
+        category_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+        category_name TEXT NOT NULL UNIQUE
+    );""",
+    _SETTINGS_TABLE,
 )
+
+# Where the vault remembers its adjustments folder, stored relative to the
+# vault file so moving or cloning the whole finance folder keeps working.
+_ADJUSTMENTS_KEY = "adjustments_dir"
 
 
 def _connect(filepath: Path, password: str | None):
@@ -86,6 +120,25 @@ def _ids_from_names(
     return ids.astype(int).tolist()
 
 
+def _is_scalar(value) -> bool:
+    """Whether an input stands for one value rather than a column of them.
+    Strings are one value, and so is anything without a length (a date, a
+    number, or None)."""
+    return value is None or isinstance(value, str) or not hasattr(value, "__len__")
+
+
+def _broadcast(inputs: dict[str, object]) -> dict[str, list]:
+    """Line up parallel inputs, repeating any lone scalar to match the rest.
+    All scalars means a single row; mismatched lengths raise."""
+    lengths = {name: len(value) for name, value in inputs.items() if not _is_scalar(value)}
+    if len(set(lengths.values())) > 1:
+        raise ValueError(f"Inputs have mismatched lengths: {lengths}")
+    n = next(iter(lengths.values()), 1)
+    return {
+        name: [value] * n if _is_scalar(value) else list(value) for name, value in inputs.items()
+    }
+
+
 class Vault:
     """A personal-finance vault: one SQLite database file holding accounts,
     assets, transactions, and asset prices.
@@ -114,8 +167,71 @@ class Vault:
         ```
     """
 
-    def __init__(self, conn):
+    def __init__(self, conn, filepath: Path):
         self._conn = conn
+        self._filepath = filepath
+
+    @property
+    def adjustments_dir(self) -> Path:
+        """The folder holding this vault's adjustments files.
+
+        Set when the vault was created, remembered inside it, and pointed
+        somewhere else by opening the vault with ``adjustments_dir=``.
+
+        Returns:
+            The folder as a `pathlib.Path`.
+
+        Raises:
+            FileNotFoundError: The vault does not know where its adjustments
+                live — it predates them. Open it once with
+                ``Vault.open(path, adjustments_dir=...)`` to tell it.
+        """
+        # Checked rather than caught: a vault predating adjustments has no
+        # settings table at all, and that should read as the same message.
+        known = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'settings';"
+        ).fetchone()
+        row = (
+            self._conn.execute(
+                "SELECT value FROM settings WHERE key = ?;", (_ADJUSTMENTS_KEY,)
+            ).fetchone()
+            if known
+            else None
+        )
+        if row is None:
+            raise FileNotFoundError(
+                f"{self._filepath} does not know where its adjustments folder is. "
+                "Open it once with Vault.open(path, adjustments_dir=...) to say where."
+            )
+        return (self._filepath.parent / row[0]).resolve()
+
+    def _remember_adjustments_dir(self, adjustments_dir: str | Path) -> None:
+        """Store the folder relative to the vault file, so the pair can move together."""
+        relative = os.path.relpath(
+            Path(adjustments_dir).expanduser().resolve(), self._filepath.parent.resolve()
+        )
+        with self._conn:
+            # Also the migration for a vault made before adjustments existed:
+            # pointing it at a folder is what gives it the table.
+            self._conn.execute(_SETTINGS_TABLE)
+            self._conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value;",
+                (_ADJUSTMENTS_KEY, relative),
+            )
+
+    def _adjustments(self) -> Path:
+        """The adjustments folder, with any missing files started for you.
+        New kinds of adjustment therefore appear on their own, matching
+        whatever encryption the folder already uses."""
+        adjustments_dir = self.adjustments_dir
+        if not adjustments_dir.is_dir():
+            raise FileNotFoundError(
+                f"This vault's adjustments folder is missing: {adjustments_dir}. "
+                "Put it back, or open the vault with adjustments_dir= to point elsewhere."
+            )
+        _ensure_files(adjustments_dir, encrypted=_folder_is_encrypted(adjustments_dir))
+        return adjustments_dir
 
     @classmethod
     def create(
@@ -125,8 +241,14 @@ class Vault:
         default_asset: str = "USD",
         encrypted: bool = False,
         overwrite: bool = False,
+        adjustments_dir: str | Path | None = None,
     ) -> "Vault":
         """Create a new vault database file and return a handle to it.
+
+        This also creates the vault's **adjustments folder** — the CSV files
+        holding your decisions about the transactions, such as which category
+        each belongs to. The vault remembers where that folder is, so no other
+        call has to name it.
 
         Args:
             filepath: Full path of the file to create, e.g. ``"~/finance/MyVault.db"``.
@@ -139,14 +261,21 @@ class Vault:
                 was entered in the last 15 minutes; otherwise you are prompted at
                 the terminal — it is never passed in code. If ``False``, the file
                 is a normal, unencrypted SQLite database readable by any SQLite tool.
+                The adjustments files are encrypted along with the vault.
             overwrite: If ``True``, delete any existing file at ``filepath`` and
-                start fresh. If ``False``, an existing file is an error.
+                start fresh. If ``False``, an existing file is an error. An
+                adjustments folder that is already there is kept as it is.
+            adjustments_dir: Where the adjustments files live, e.g.
+                ``"~/finance/adjustments"``. Created if it does not exist yet.
+                ``None`` (default) puts them in a folder named after the vault
+                (``MyVault.db`` → ``MyVault_adjustments``) beside the vault file.
 
         Returns:
             An open `Vault`.
 
         Raises:
-            FileNotFoundError: The parent directory does not exist.
+            FileNotFoundError: The parent directory does not exist, or the
+                folder above ``adjustments_dir`` does not.
             FileExistsError: A file already exists at ``filepath`` and
                 ``overwrite`` is ``False``.
 
@@ -155,6 +284,9 @@ class Vault:
             v = Vault.create("~/finance/MyVault.db")
             v = Vault.create("/tmp/rebuild.db", overwrite=True)   # rebuild-from-scratch scripts
             v = Vault.create("~/secret.db", encrypted=True)       # prompts for a password
+
+            # keep the adjustments with your statements, wherever those live
+            v = Vault.create("~/finance/MyVault.db", adjustments_dir="~/statements/adjustments")
             ```
         """
         filepath = Path(filepath).expanduser()
@@ -164,6 +296,10 @@ class Vault:
             raise FileExistsError(
                 f"A file already exists at {filepath} (pass overwrite=True to replace it)"
             )
+        if adjustments_dir is None:
+            adjustments_dir = filepath.parent / f"{filepath.stem}_adjustments"
+        adjustments_dir = Path(adjustments_dir).expanduser()
+
         # Settle the password before touching the existing file, so a failed or
         # abandoned prompt can't leave the old vault already deleted.
         password = _get_password(confirm=True) if encrypted else None
@@ -178,10 +314,15 @@ class Vault:
                 "INSERT INTO assets (asset_id, asset_name) VALUES (1, ?);",
                 (default_asset,),
             )
-        return cls(conn)
+        vault = cls(conn, filepath)
+        # Never touches an adjustments folder that is already there, so a
+        # rebuild keeps every decision you have made.
+        _ensure_files(adjustments_dir, encrypted=encrypted)
+        vault._remember_adjustments_dir(adjustments_dir)
+        return vault
 
     @classmethod
-    def open(cls, filepath: str | Path) -> "Vault":
+    def open(cls, filepath: str | Path, *, adjustments_dir: str | Path | None = None) -> "Vault":
         """Open an existing vault file and return a handle to it.
 
         Whether the file is encrypted is detected automatically. For an
@@ -193,6 +334,10 @@ class Vault:
 
         Args:
             filepath: Path of an existing vault file. ``~`` is expanded.
+            adjustments_dir: Where this vault's adjustments files live. Only
+                needed to *change* the answer — to point a vault at a folder
+                you have moved, or to give one to a vault made before it had
+                any. The new location is remembered from then on.
 
         Returns:
             An open `Vault`.
@@ -206,6 +351,9 @@ class Vault:
             ```python
             v = Vault.open("~/finance/MyVault.db")
             v = Vault.open("~/secret.db")   # encrypted: prompts unless remembered
+
+            # the adjustments folder moved
+            v = Vault.open("~/finance/MyVault.db", adjustments_dir="~/statements/adjustments")
             ```
         """
         filepath = Path(filepath).expanduser()
@@ -215,11 +363,16 @@ class Vault:
             encrypted = f.read(16) != _SQLITE_MAGIC
         password = _get_password(confirm=False) if encrypted else None
         try:
-            return cls(_connect(filepath, password))
+            vault = cls(_connect(filepath, password), filepath)
         except ValueError:
             if encrypted:
                 forget_password()
             raise
+        if adjustments_dir is not None:
+            adjustments_dir = Path(adjustments_dir).expanduser()
+            _ensure_files(adjustments_dir, encrypted=_folder_is_encrypted(adjustments_dir))
+            vault._remember_adjustments_dir(adjustments_dir)
+        return vault
 
     def close(self) -> None:
         """Close the vault's database connection. The `Vault` object cannot be
@@ -372,11 +525,11 @@ class Vault:
         """Record transactions in the ledger — one row per amount of one asset
         moving in or out of one account.
 
-        Everything is a transaction: a $40 grocery charge is one row
-        (``-40.00`` of the base currency). A brokerage purchase is two rows on
-        the same date: the money leaving (``-1000.00``, asset ``"USD"``) and
-        the shares arriving (``+3.2``, asset ``"VTI"``). A transfer between two
-        of your accounts is two ordinary rows, one per account.
+        A $40 grocery charge is one row (``-40.00`` of the base currency). A
+        brokerage purchase is two rows on the same date: the money leaving
+        (``-1000.00``, asset ``"USD"``) and the shares arriving (``+3.2``,
+        asset ``"VTI"``). A transfer between two of your accounts is two
+        ordinary rows, one per account.
 
         Idempotent: loading the same transactions again (for example,
         re-running a script over a whole statement CSV) never double-counts —
@@ -509,25 +662,27 @@ class Vault:
             - ``description`` — free-form description
             - ``amount`` — signed amount, in the transaction's asset
             - ``asset`` — name of the asset the amount is denominated in
+            - ``category`` — the transaction's category, ``"unclassified"`` if none
             - ``ownership_share`` — your fraction of the account
             - ``account_group_name`` — the account's group label
 
         Examples:
             ```python
             v.list_transactions()
-            #    transaction_id account_name       date    description   amount asset  ownership_share account_group_name
-            # 0               1     checking 2026-07-01  WHOLEFDS #123   -40.00   USD              1.0               cash
-            # 1               2    brokerage 2026-07-02        buy VTI -1000.00   USD              1.0        investments
-            # 2               3    brokerage 2026-07-02        buy VTI     3.20   VTI              1.0        investments
+            #    transaction_id account_name       date    description   amount asset      category  ownership_share account_group_name
+            # 0               1     checking 2026-07-01  WHOLEFDS #123   -40.00   USD     groceries              1.0               cash
+            # 1               2    brokerage 2026-07-02        buy VTI -1000.00   USD  unclassified              1.0        investments
+            # 2               3    brokerage 2026-07-02        buy VTI     3.20   VTI  unclassified              1.0        investments
             ```
         """
         df = self._read_df(
             """
             SELECT trans_id, account_name, trans_date, trans_desc, amount,
-                   asset_name, ownership_share, account_group_name
+                   asset_name, category_name, ownership_share, account_group_name
             FROM transactions
             LEFT JOIN accounts ON accounts.account_id = transactions.account_id
             LEFT JOIN assets ON assets.asset_id = transactions.asset_id
+            LEFT JOIN categories ON categories.category_id = transactions.category_id
             ORDER BY trans_date, account_name
             ;"""
         )
@@ -538,27 +693,551 @@ class Vault:
             "description",
             "amount",
             "asset",
+            "category",
             "ownership_share",
             "account_group_name",
         ]
         df["date"] = pd.to_datetime(df["date"])
+        df["category"] = df["category"].fillna(UNCLASSIFIED)
         return df
+
+    def create_category(self, categories: str | Sequence[str]) -> None:
+        """Define a category that rules and exceptions can then use.
+
+        Rules and exceptions may only use categories defined here, so a
+        misspelled category is an error rather than a new category.
+
+        Already-defined categories are skipped, so this is safe to run
+        repeatedly. Capitalization does not make a second category: once
+        ``"groceries"`` is defined, ``"Groceries"`` means the same thing, and
+        the spelling you defined is the one that gets used.
+
+        Args:
+            categories: The category name, or a list of them, e.g.
+                ``"groceries"``. Free-form text; ``"unclassified"`` is reserved
+                because it means "no category".
+
+        Returns:
+            Nothing.
+
+        Raises:
+            FileNotFoundError: The adjustments folder is missing.
+            ValueError: A category is empty or the reserved name
+                ``"unclassified"``.
+
+        Examples:
+            ```python
+            v.create_category("groceries")
+            v.create_category(["rent", "travel", "dining"])
+            ```
+        """
+        adjustments_dir = self._adjustments()
+        names = [categories] if isinstance(categories, str) else list(categories)
+        new = pd.Series(names, dtype=str).str.strip()
+        if (new == "").any():
+            raise ValueError("category cannot be empty")
+        if (new.str.lower() == UNCLASSIFIED).any():
+            raise ValueError(f'"{UNCLASSIFIED}" is reserved: it means no category')
+
+        defined, _ = _read_category_file(adjustments_dir, _CATEGORIES_FILE, "categories")
+        known = set(defined["category"].str.lower())
+        lowered = new.str.lower()
+        new = new[~lowered.duplicated(keep="first") & ~lowered.isin(known)]
+        if not new.empty:
+            _write_file(
+                adjustments_dir,
+                _CATEGORIES_FILE,
+                pd.concat([defined, pd.DataFrame({"category": new})], ignore_index=True),
+            )
+
+    def apply_categories(self) -> pd.DataFrame:
+        """Recompute every transaction's category from your adjustments files.
+
+        The vault's category state is rewritten from the files each time, so
+        this is safe to run as often as you like. The files live in the folder
+        the vault remembers — see
+        [`adjustments_dir`][goblinvest_core.Vault.adjustments_dir].
+
+        **The categories file** (``categories.csv``, column ``category``) lists
+        the categories defined with
+        [`create_category`][goblinvest_core.Vault.create_category]. The other
+        two files may only use categories from this list.
+
+        **The rules file** (``category_rules.csv``, columns
+        ``pattern,category``) does the bulk. A transaction takes a rule's
+        category when its description equals the pattern, ignoring
+        capitalization. When two rules share a pattern, the one nearer the
+        bottom of the file wins. Same-day duplicate transactions (stored as
+        ``"Netflix (2)"``) match their base description's rule.
+
+        **The exceptions file** (``category_exceptions.csv``, columns
+        ``account,date,description,amount,asset,category``) categorizes one
+        exact transaction, and beats every rule. Its first five columns must
+        match the transaction as `list_transactions` shows it (``asset`` may be
+        left blank for the base currency); account and asset names ignore
+        capitalization.
+
+        Transactions no file claims are ``"unclassified"`` — see
+        [`list_uncategorized`][goblinvest_core.Vault.list_uncategorized].
+
+        Returns:
+            A pandas ``DataFrame`` of exception rows that matched no
+            transaction (same columns as the file), so a typo or a reworded
+            bank description never fails silently. Empty means all clean.
+
+        Raises:
+            FileNotFoundError: The adjustments folder is missing, or the vault
+                does not know where it is.
+            ValueError: A file is malformed — missing columns, an empty
+                pattern or category, the reserved category name
+                ``"unclassified"``, or a category that has not been defined
+                with [`create_category`][goblinvest_core.Vault.create_category].
+
+        Examples:
+            ```python
+            orphans = v.apply_categories()
+            if not orphans.empty:
+                print("These exceptions no longer match anything:", orphans)
+            ```
+        """
+        adjustments_dir = self._adjustments()
+        defined, _ = _read_category_file(adjustments_dir, _CATEGORIES_FILE, "categories")
+        rules, rules_path = _read_category_file(adjustments_dir, _RULES_FILE, "category rules")
+        exceptions, exceptions_path = _read_category_file(
+            adjustments_dir, _EXCEPTIONS_FILE, "category exceptions"
+        )
+        bad = rules["pattern"].isna() | (rules["pattern"].str.strip() == "")
+        if bad.any():
+            raise ValueError(f"{rules_path} has {int(bad.sum())} row(s) with an empty pattern")
+
+        # Both files may only hand out categories you have defined, and they
+        # hand them out under the spelling you defined them with.
+        canonical = _canonical_categories(defined)
+        rules["category"] = _resolve_categories(rules["category"], canonical, source=rules_path)
+        exceptions["category"] = _resolve_categories(
+            exceptions["category"], canonical, source=exceptions_path
+        )
+
+        ledger = self._read_df(
+            """
+            SELECT trans_id, account_name, trans_date, trans_desc, amount, asset_name
+            FROM transactions
+            LEFT JOIN accounts ON accounts.account_id = transactions.account_id
+            LEFT JOIN assets ON assets.asset_id = transactions.asset_id
+            ;"""
+        )
+
+        # A dict keeps the last value per key, which is exactly last-rule-wins.
+        rule_of = dict(zip(_normalize_desc(rules["pattern"]), rules["category"]))
+        category = _normalize_desc(ledger["trans_desc"].astype(str)).map(rule_of)
+
+        # Exceptions: normalize the file's key columns to the ledger's form,
+        # keep the last row per key, and match with an exact merge.
+        base_asset = self._conn.execute(
+            "SELECT asset_name FROM assets WHERE asset_id = 1;"
+        ).fetchone()[0]
+        try:
+            exc_amount = exceptions["amount"].astype(float)
+        except ValueError:
+            raise ValueError(f"{exceptions_path} has a non-numeric amount") from None
+        exc_asset = exceptions["asset"].fillna("").str.strip()
+        exc = pd.DataFrame(
+            {
+                "account": exceptions["account"].fillna("").str.strip().str.lower(),
+                "date": pd.to_datetime(exceptions["date"], errors="coerce").dt.strftime("%Y-%m-%d"),
+                "description": exceptions["description"].fillna(""),
+                "amount": exc_amount,
+                "asset": exc_asset.where(exc_asset != "", base_asset).str.lower(),
+                "category": exceptions["category"],
+            }
+        )
+        key = ["account", "date", "description", "amount", "asset"]
+        exc = exc[~exc.duplicated(subset=key, keep="last")]
+
+        matched: set[int] = set()
+        if not exc.empty and not ledger.empty:
+            led = pd.DataFrame(
+                {
+                    "account": ledger["account_name"].str.lower(),
+                    "date": ledger["trans_date"],
+                    "description": ledger["trans_desc"],
+                    "amount": ledger["amount"].astype(float),
+                    "asset": ledger["asset_name"].str.lower(),
+                }
+            )
+            m = led.merge(exc.reset_index(names="_row"), on=key, how="left")
+            category = category.where(m["category"].isna(), m["category"])
+            matched = set(m["_row"].dropna().astype(int))
+        orphans = exceptions.loc[sorted(set(exc.index) - matched)].reset_index(drop=True)
+
+        # Every category you have defined goes in, used or not, so a count of
+        # zero is visible rather than invisible.
+        names = sorted(set(canonical.values()))
+        id_of = {name: i for i, name in enumerate(names, start=1)}
+        assigned = category.notna()
+        with self._conn:
+            self._conn.execute("UPDATE transactions SET category_id = NULL;")
+            self._conn.execute("DELETE FROM categories;")
+            self._conn.executemany(
+                "INSERT INTO categories (category_id, category_name) VALUES (?, ?);",
+                [(i, name) for name, i in id_of.items()],
+            )
+            self._conn.executemany(
+                "UPDATE transactions SET category_id = ? WHERE trans_id = ?;",
+                zip(
+                    category[assigned].map(id_of).tolist(),
+                    ledger.loc[assigned, "trans_id"].tolist(),
+                ),
+            )
+        return orphans
+
+    def set_category_rule(
+        self,
+        descriptions: str | Sequence[str],
+        categories: str | Sequence[str],
+    ) -> None:
+        """Categorize every transaction with a given description.
+
+        Each decision is appended as a rule in your rules file (the description
+        becomes the pattern), then your adjustments are re-applied. The
+        category covers every transaction with that description, including ones
+        in statements you load later. To categorize a single transaction
+        without touching its look-alikes, use
+        [`set_category_exception`][goblinvest_core.Vault.set_category_exception]
+        instead.
+
+        One description or many: pass parallel lists to record a batch of
+        decisions at once, and a lone string applies to all of them. A batch
+        costs one re-apply rather than one per decision.
+
+        Nothing is appended for a description the file already gives that
+        category. Giving a different category appends a line, which wins
+        because later rules beat earlier ones.
+
+        Args:
+            descriptions: Transaction description, or a list of them, exactly
+                as `list_transactions` shows them. A same-day duplicate suffix
+                like ``" (2)"`` is stripped for you.
+            categories: Category name for each description, or a single one
+                for all of them. Each must already be defined with
+                [`create_category`][goblinvest_core.Vault.create_category]
+                (capitalization ignored). Naming the same description twice in
+                one call keeps the last category given.
+
+        Returns:
+            Nothing.
+
+        Raises:
+            FileNotFoundError: The adjustments folder is missing.
+            ValueError: The inputs have mismatched lengths, a description or
+                category is empty, a category is the reserved name
+                ``"unclassified"``, or a category has not been defined.
+                Nothing is written when this happens.
+
+        Examples:
+            ```python
+            v.set_category_rule("Netflix", "streaming")
+
+            # one category across many descriptions
+            v.set_category_rule(["Trader Joe's", "SAFEWAY #1042", "COSTCO WHSE"], "groceries")
+
+            # or clear the whole to-do list in one go
+            v.set_category_rule(v.list_uncategorized()["description"], "misc")
+            ```
+        """
+        columns = _broadcast({"descriptions": descriptions, "categories": categories})
+        new = pd.DataFrame(
+            {
+                "pattern": pd.Series(columns["descriptions"], dtype=str),
+                "category": pd.Series(columns["categories"], dtype=str),
+            }
+        )
+        new["category"] = new["category"].str.strip()
+        if (new["category"] == "").any():
+            raise ValueError("category cannot be empty")
+        reserved = new["category"].str.lower() == UNCLASSIFIED
+        if reserved.any():
+            raise ValueError(f'"{UNCLASSIFIED}" is reserved: it means no category')
+        new["pattern"] = _strip_dup_suffix(new["pattern"].str.strip()).str.strip()
+        if (new["pattern"] == "").any():
+            raise ValueError("description cannot be empty")
+
+        # An undefined category is refused before the file is touched.
+        adjustments_dir = self._adjustments()
+        defined, _ = _read_category_file(adjustments_dir, _CATEGORIES_FILE, "categories")
+        new["category"] = _resolve_categories(new["category"], _canonical_categories(defined))
+
+        rules, _ = _read_category_file(adjustments_dir, _RULES_FILE, "category rules")
+        rule_of = dict(
+            zip(_normalize_desc(rules["pattern"].fillna("")), rules["category"].str.lower())
+        )
+        # One decision per description (the last one given), and only the ones
+        # the file doesn't already make.
+        key = _normalize_desc(new["pattern"])
+        new = new[~key.duplicated(keep="last") & (key.map(rule_of) != new["category"].str.lower())]
+        if not new.empty:
+            _write_file(adjustments_dir, _RULES_FILE, pd.concat([rules, new], ignore_index=True))
+        self.apply_categories()
+
+    def set_category_exception(
+        self,
+        accounts: str | Sequence[str],
+        dates: datetime.date | str | Sequence[datetime.date | str],
+        descriptions: str | Sequence[str],
+        amounts: float | Sequence[float],
+        categories: str | None | Sequence[str | None],
+        *,
+        assets: str | None | Sequence[str | None] = None,
+    ) -> None:
+        """Categorize exact transactions, without affecting their look-alikes.
+
+        Where [`set_category_rule`][goblinvest_core.Vault.set_category_rule]
+        categorizes every transaction with a description, this categorizes one
+        transaction whatever the rules say. Each decision is recorded in your
+        exceptions file (replacing any earlier exception for the same
+        transaction), then your adjustments are re-applied.
+
+        One transaction or many: pass parallel lists — the same shape
+        [`add_transactions`][goblinvest_core.Vault.add_transactions] takes —
+        with a lone value applying to all of them.
+
+        Args:
+            accounts: Account name for each transaction, or one for all of
+                them (capitalization ignored).
+            dates: Date of each transaction, as ``datetime.date`` objects or
+                ``"YYYY-MM-DD"`` strings.
+            descriptions: The description of each, exactly as
+                `list_transactions` shows it — including any ``" (2)"``
+                suffix, which is what pins down one of two otherwise-identical
+                transactions.
+            amounts: The signed amount of each transaction.
+            categories: Category name for each, or one for all of them, or
+                ``None`` to remove an existing exception (the transaction falls
+                back to the rules on the re-apply). A list may mix names and
+                ``None`` to set some and clear others. Each name must already
+                be defined with
+                [`create_category`][goblinvest_core.Vault.create_category].
+            assets: Asset name for each transaction (capitalization ignored),
+                or one for all. ``None`` (default) means the vault's base
+                currency.
+
+        Returns:
+            Nothing.
+
+        Raises:
+            FileNotFoundError: The adjustments folder is missing.
+            ValueError: The inputs have mismatched lengths, no transaction in
+                the vault matches a row (every unmatched row is named), or a
+                category is empty, undefined, or the reserved name
+                ``"unclassified"``. Nothing is written when this happens.
+
+        Examples:
+            ```python
+            v.set_category_exception(
+                "checking",
+                "2026-02-14",
+                "CHECK # 1145",
+                -500.00,
+                "gifts",
+            )
+
+            # a batch: two checks that were really gifts
+            v.set_category_exception(
+                "checking",
+                ["2026-02-14", "2026-03-14"],
+                ["CHECK # 1145", "CHECK # 1146"],
+                [-500.00, -200.00],
+                "gifts",
+            )
+            ```
+        """
+        columns = _broadcast(
+            {
+                "accounts": accounts,
+                "dates": dates,
+                "descriptions": descriptions,
+                "amounts": amounts,
+                "categories": categories,
+                "assets": assets,
+            }
+        )
+        base_asset = self._conn.execute(
+            "SELECT asset_name FROM assets WHERE asset_id = 1;"
+        ).fetchone()[0]
+
+        category = pd.Series(columns["categories"], dtype=object)
+        given = category.notna()
+        category = category.where(~given, category[given].astype(str).str.strip())
+        if (category[given] == "").any():
+            raise ValueError("category cannot be empty (pass None to remove an exception)")
+        if (category[given].str.lower() == UNCLASSIFIED).any():
+            raise ValueError(f'"{UNCLASSIFIED}" is reserved: it means no category')
+        # An undefined category is refused before the file is touched.
+        adjustments_dir = self._adjustments()
+        defined, _ = _read_category_file(adjustments_dir, _CATEGORIES_FILE, "categories")
+        category = _resolve_categories(category, _canonical_categories(defined))
+
+        asset = pd.Series(columns["assets"], dtype=object).fillna(base_asset)
+        new = pd.DataFrame(
+            {
+                "account": pd.Series(columns["accounts"], dtype=str).str.strip(),
+                "date": pd.to_datetime(list(columns["dates"])).strftime("%Y-%m-%d"),
+                "description": pd.Series(columns["descriptions"], dtype=str),
+                "amount": pd.Series(columns["amounts"], dtype=float),
+                "asset": asset.astype(str).str.strip(),
+                "category": category,
+            }
+        )
+
+        # Every row must name a real transaction, and all the bad ones are
+        # reported at once rather than one call at a time.
+        ledger = self._read_df(
+            """
+            SELECT account_name, trans_date, trans_desc, amount, asset_name
+            FROM transactions
+            LEFT JOIN accounts ON accounts.account_id = transactions.account_id
+            LEFT JOIN assets ON assets.asset_id = transactions.asset_id
+            ;"""
+        )
+        key = ["account", "date", "description", "amount", "asset"]
+        led = pd.DataFrame(
+            {
+                "account": ledger["account_name"].str.lower(),
+                "date": ledger["trans_date"],
+                "description": ledger["trans_desc"],
+                "amount": ledger["amount"].astype(float),
+                "asset": ledger["asset_name"].str.lower(),
+            }
+        ).drop_duplicates()
+        lowered = new[key].assign(
+            account=new["account"].str.lower(), asset=new["asset"].str.lower()
+        )
+        unmatched = lowered.merge(led, on=key, how="left", indicator=True)["_merge"] == "left_only"
+        if unmatched.any():
+            missing = new[unmatched.to_numpy()]
+            shown = "\n".join(
+                f"  account={r.account!r}, date={r.date}, description={r.description!r}, "
+                f"amount={r.amount}, asset={r.asset!r}"
+                for r in missing.head(5).itertuples()
+            )
+            more = f"\n  ... and {len(missing) - 5} more" if len(missing) > 5 else ""
+            raise ValueError(f"No transaction matches:\n{shown}{more}")
+
+        # One exception per transaction (the last one given for it).
+        new = new[~lowered.duplicated(keep="last").to_numpy()]
+
+        exceptions, _ = _read_category_file(
+            adjustments_dir, _EXCEPTIONS_FILE, "category exceptions"
+        )
+        exc_asset = exceptions["asset"].fillna("").str.strip()
+        old = pd.DataFrame(
+            {
+                "account": exceptions["account"].fillna("").str.strip().str.lower(),
+                "date": pd.to_datetime(exceptions["date"], errors="coerce").dt.strftime("%Y-%m-%d"),
+                "description": exceptions["description"].fillna(""),
+                "amount": pd.to_numeric(exceptions["amount"], errors="coerce"),
+                "asset": exc_asset.where(exc_asset != "", base_asset).str.lower(),
+            }
+        )
+        # Drop whatever the file already said about these transactions; rows
+        # given a category come back, rows given None stay gone.
+        superseded = pd.MultiIndex.from_frame(old).isin(
+            pd.MultiIndex.from_frame(lowered.loc[new.index])
+        )
+        exceptions = exceptions[~superseded]
+        keep = new[new["category"].notna()]
+        if not keep.empty:
+            exceptions = pd.concat([exceptions, keep], ignore_index=True)
+        _write_file(adjustments_dir, _EXCEPTIONS_FILE, exceptions)
+        self.apply_categories()
+
+    def list_categories(self) -> pd.DataFrame:
+        """Return every defined category and how many transactions it covers.
+
+        Returns:
+            A pandas ``DataFrame`` with one row per defined category and
+            columns ``category_id``, ``category_name``, ``n_transactions``,
+            ordered by ``category_id``. Categories nothing has reached yet are
+            listed too, with ``n_transactions`` of zero.
+
+        Examples:
+            ```python
+            v.list_categories()
+            #    category_id category_name  n_transactions
+            # 0            1        dining              84
+            # 1            2     groceries             311
+            ```
+        """
+        return self._read_df(
+            """
+            SELECT categories.category_id, category_name, COUNT(trans_id) AS n_transactions
+            FROM categories
+            LEFT JOIN transactions ON transactions.category_id = categories.category_id
+            GROUP BY categories.category_id, category_name
+            ORDER BY categories.category_id
+            ;"""
+        )
+
+    def list_uncategorized(self) -> pd.DataFrame:
+        """Return the transactions that still need categorizing.
+
+        They are grouped by description (same-day duplicate suffixes like
+        ``" (2)"`` are ignored), so each row is one candidate rule for the
+        rules file, sorted so the row covering the most transactions comes
+        first.
+
+        Returns:
+            A pandas ``DataFrame`` with columns ``account_name``,
+            ``description``, ``n_transactions``, ``total_amount``, sorted by
+            ``n_transactions`` descending. Empty when everything is
+            categorized.
+
+        Examples:
+            ```python
+            v.list_uncategorized()
+            #   account_name    description  n_transactions  total_amount
+            # 0  credit-card   Trader Joe's              41      -3105.22
+            # 1     checking  ATM withdrawal             12       -840.00
+            ```
+        """
+        columns = ["account_name", "description", "n_transactions", "total_amount"]
+        raw = self._read_df(
+            """
+            SELECT account_name, trans_desc, amount
+            FROM transactions
+            LEFT JOIN accounts ON accounts.account_id = transactions.account_id
+            WHERE transactions.category_id IS NULL
+            ;"""
+        )
+        if raw.empty:
+            return pd.DataFrame(columns=columns)
+        out = (
+            raw.assign(description=_strip_dup_suffix(raw["trans_desc"].astype(str)))
+            .groupby(["account_name", "description"], sort=False)
+            .agg(n_transactions=("amount", "size"), total_amount=("amount", "sum"))
+            .reset_index()
+        )
+        out["total_amount"] = out["total_amount"].round(2)
+        out = out.sort_values(
+            ["n_transactions", "account_name", "description"], ascending=[False, True, True]
+        )
+        return out.reset_index(drop=True)[columns]
 
     def populate_yfinance_prices(self, assets: str | Sequence[str]) -> None:
         """Fetch daily prices from Yahoo Finance and store them in the vault.
 
         For each asset named, daily closing prices are fetched from the date of
         that asset's first transaction through today and stored in the vault.
-        Re-runnable like everything else: refreshing just fills in the days
-        since the last run. Requires internet access.
+        Re-running fills in the days since the last run. Requires internet
+        access.
 
-        Stored prices match what your brokerage statement said *at the time*,
-        which means two deliberate departures from what Yahoo displays:
+        Stored prices are what the asset traded at on the day, so shares held ×
+        stored price matches the statement from that date. That means two
+        departures from what Yahoo displays:
 
         - **Splits are un-adjusted.** Yahoo rewrites history after a stock
           split (after a 10-for-1 split, a pre-split $1,200 close is served as
-          $120). Those rewrites are undone, so shares held × stored price on
-          any date matches the statement from that date.
+          $120); those rewrites are undone here.
         - **Dividends are not deducted.** A dividend lands in the ledger as a
           cash transaction when you load the statement CSV, so prices must not
           also account for it.
@@ -710,7 +1389,7 @@ class Vault:
         return out
 
     def accumulate_mv(self, group_by: str | None = None) -> pd.DataFrame:
-        """Compute market value over time — what everything was worth, day by day.
+        """Compute the market value of every position, day by day.
 
         For every day from your first transaction through today: the units
         held that day (accumulated from the ledger, weighted by ownership

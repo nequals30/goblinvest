@@ -1,15 +1,16 @@
 # goblinvest-core
 
-A library for understanding your personal finances — balances, net-worth history, and
-(coming) investment returns and taxes — computed from the complete history of your own
-transactions.
+A Python library for personal finances. You load every transaction from your
+statement CSVs into a SQLite file — the **vault** — and the library computes
+balances, net-worth history, and (coming) investment returns and taxes.
 
-It is built on one idea: **raw statement CSVs are the source of truth**. Statements from
-your bank, brokerage, and credit cards load into a SQLite database (the "vault") that
-all analysis runs against, and the vault is a disposable build artifact: rebuildable
-from scratch, idempotently, with one script. Loading the same CSV twice never
-double-counts. If a row is wrong, fix the CSV and rebuild — the vault is never edited in
-place.
+A vault holds your transactions — each a signed amount of one asset, in one
+account, on one date — and prices for the assets that trade publicly. Your own
+decisions about those transactions, such as which category each belongs to, live
+beside the vault in CSV files you can edit, called **adjustments**.
+
+Loading the same transactions twice never double-counts them, so a script that
+loads all of your statements can be re-run at any time.
 
 ## Install
 
@@ -35,11 +36,21 @@ v.list_accounts()
 v.close()
 ```
 
-## Recording transactions
+A vault can also be used in a `with` block, which closes it for you:
 
-Every movement of money (or shares, or anything else) is a transaction: a signed
-amount of one asset, in one account, on one date. A brokerage purchase is two rows —
-the dollars leaving and the shares arriving:
+```python
+with Vault.open("~/finance/MyVault.db") as v:
+    accounts = v.list_accounts()
+```
+
+## Transactions
+
+Accounts and assets are registered before transactions can refer to them. An
+asset is anything you hold an amount of: the base currency (`USD` unless you
+say otherwise), a ticker, another currency.
+
+A brokerage purchase is two transactions on the same date — the dollars leaving
+and the shares arriving:
 
 ```python
 v.add_account("brokerage", account_group_name="investments")
@@ -59,30 +70,21 @@ v.list_transactions()
 # 1               2    brokerage 2026-07-02     buy VTI     3.20   VTI              1.0        investments
 ```
 
-Loading the same transactions twice never double-counts, so a script that rebuilds the
-vault from all your statement CSVs can be re-run start to finish at any time.
-
 ## Market prices
 
-Assets that trade publicly are priced straight from Yahoo Finance — name your assets
-with their Yahoo ticker symbols and call:
+Name an asset with its Yahoo Finance ticker symbol and its daily closing prices
+can be fetched and stored in the vault:
 
 ```python
 v.populate_yfinance_prices(["NVDA", "VTI"])
 ```
 
-Each asset's daily closing prices are fetched from its first transaction through today
-and stored in the vault; re-running just fills in the days since the last run. Two
-things make the stored prices match what your brokerage statement said *at the time*:
+Prices run from the asset's first transaction to today; re-running fills in the
+days since the last run. Stored prices are what the asset actually traded at on
+the day, so shares held × price agrees with the statement from that date. (Yahoo
+rewrites its own history after a stock split; that rewriting is undone here.)
 
-- **Splits are un-adjusted.** Yahoo rewrites history after a stock split — after
-  NVDA's 2024 ten-for-one split, a June-2023 close of ~$420 is served as ~$42. The
-  vault stores the price as it traded that day, so shares held × price on any date
-  agrees with the statement from that date.
-- **Dividends are not deducted.** A dividend arrives in your ledger as a cash
-  transaction when you load the statement CSV, so prices must not also account for it.
-
-Read prices back as a grid — one row per date you ask for, one column per asset:
+Read prices back as a grid — one row per date, one column per asset:
 
 ```python
 v.get_asset_prices(["2026-07-03", "2026-07-04"], ["USD", "NVDA"])
@@ -92,15 +94,15 @@ v.get_asset_prices(["2026-07-03", "2026-07-04"], ["USD", "NVDA"])
 # 2026-07-04    1.0  159.34   <- market closed: last known price carried forward
 ```
 
-The base currency is always exactly 1.0. Dates with no quote (weekends, holidays)
-carry the last known price forward — pass `fill_missing_with_stale=False` to get `NaN`
-instead. Dates before an asset's first known price are `NaN` either way.
+The base currency is always exactly 1.0. Dates with no quote (weekends,
+holidays) carry the last known price forward — pass
+`fill_missing_with_stale=False` for `NaN` instead. Dates before an asset's first
+known price are `NaN` either way.
 
-## Balances and net-worth history
+## Balances and net worth
 
-`summarize_accounts` is the "what do I hold right now" view — every non-zero position,
-valued at its latest known price, with the price's date shown so a stale quote is
-visible:
+`summarize_accounts` gives current holdings: every non-zero position, valued at
+its latest known price, with that price's date so a stale quote is visible.
 
 ```python
 v.summarize_accounts()
@@ -110,9 +112,8 @@ v.summarize_accounts()
 # 2     checking               cash   USD   3936.8    1.0        NaT              1.0       3936.80       2026-07-03
 ```
 
-`accumulate_mv` is the same idea through time: for every day from your first
-transaction to today, the market value of each position — units held that day times
-that day's price. Total net worth is the row sum:
+`accumulate_mv` gives the same thing for every day from your first transaction
+to today. Net worth is the row sum:
 
 ```python
 mv = v.accumulate_mv()                 # one column per account::asset pair
@@ -126,95 +127,146 @@ v.accumulate_mv(group_by="account_group_name")
 ```
 
 `group_by` buckets the columns by `"account_name"`, `"asset"`, or
-`"account_group_name"`. A held asset with no stored price shows as `NaN` — run
+`"account_group_name"`. An asset held with no stored price shows as `NaN` — run
 `populate_yfinance_prices` for it.
 
-A vault can also be used in a `with` block, which closes it automatically:
+## Categories
+
+Every transaction has exactly one category, or counts as `"unclassified"` until
+it gets one. Categories are defined and assigned in CSV files kept in the
+vault's **adjustments folder**; the vault's categories are rebuilt from those
+files, never the other way around.
+
+| File | Columns | What it does |
+| --- | --- | --- |
+| `categories.csv` | `category` | lists the categories you have defined |
+| `category_rules.csv` | `pattern,category` | categorizes every transaction whose description equals the pattern |
+| `category_exceptions.csv` | `account,date,description,amount,asset,category` | categorizes one exact transaction |
+
+`Vault.create` creates the folder, and the vault remembers where it is, so no
+other call has to name it:
 
 ```python
-with Vault.open("~/finance/MyVault.db") as v:
-    accounts = v.list_accounts()
+v = Vault.create("~/finance/MyVault.db")   # folder created beside the vault
+# or keep it with your statements:
+v = Vault.create("~/finance/MyVault.db", adjustments_dir="~/statements/adjustments")
 ```
 
-## Encrypted vaults
+Define your categories, then apply them:
 
-Pass `encrypted=True` when creating a vault and the file on disk is encrypted with
-[SQLCipher](https://www.zetetic.net/sqlcipher/). Opening it requires the same password;
-without it the file is unreadable (it is not even recognizable as a SQLite database).
+```python
+v.create_category(["groceries", "rent", "travel", "streaming"])
 
-The password is never written in code — you type it at a hidden terminal prompt, so it
-can't leak through your scripts or shell history. Once entered, it is remembered in
-memory for 15 minutes, so working with a vault doesn't mean retyping the password at
-every step:
+orphans = v.apply_categories()
+v.list_transactions()      # now has a `category` column
+```
+
+Both calls are safe to re-run, so they belong in your load script. Using a
+category that was never defined is an error rather than a new category;
+capitalization is ignored, and the spelling in `categories.csv` is the one you
+get back. `apply_categories` returns any exception rows that no longer match a
+transaction, which is what a bank rewording its descriptions looks like.
+
+Categorize as you go with `set_category_rule`, which writes the rule into the
+file for you. It covers every transaction with that description, including ones
+in statements you have not loaded yet:
+
+```python
+v.set_category_rule("Netflix", "streaming")
+v.set_category_rule(["Trader Joe's", "SAFEWAY #1042"], "groceries")   # or a batch
+```
+
+Rules nearer the bottom of the file win, so reclassifying something is another
+call. To categorize a single transaction whatever the rules say, use
+`set_category_exception`. It takes the same parallel lists as
+`add_transactions`, and a category of `None` removes the exception again:
+
+```python
+v.set_category_exception("checking", "2026-02-14", "CHECK # 1145", -500.00, "gifts")
+```
+
+`list_uncategorized()` is the to-do list: everything still unclassified, grouped
+by description, sorted so the row covering the most transactions comes first.
+`list_categories()` lists every category with its transaction count.
+
+??? note "Technical details"
+
+    Descriptions match exactly, ignoring capitalization. Transactions that are
+    identical within one load are stored with `" (2)"`-style suffixes; rules
+    ignore the suffix, so a rule for `Netflix` also covers `Netflix (2)`, while
+    an exception matches the description verbatim, suffix included. File edits
+    are written to a temporary file and swapped into place, so an interrupted
+    write cannot corrupt them.
+
+## Encryption
+
+Passwords are never passed in code. You type one at a hidden terminal prompt and
+it is remembered in memory for 15 minutes, so a script that reads a hundred
+files asks once. `ask_password()` asks up front; `forget_password()` clears it
+immediately. Anything that needs a password prompts on its own if none is
+remembered.
+
+### Vaults
+
+Pass `encrypted=True` and the vault file is encrypted with
+[SQLCipher](https://www.zetetic.net/sqlcipher/). Opening it needs the same
+password; without it the file is unreadable. The adjustments files are encrypted
+along with it.
 
 ```python
 from goblinvest_core import Vault, ask_password
 
-ask_password()   # type it once (prompted and confirmed, nothing echoed)
+ask_password()
 
-v = Vault.create("~/finance/MyVault.db", encrypted=True)   # no prompt: remembered
+v = Vault.create("~/finance/MyVault.db", encrypted=True)
+v.create_category(["streaming", "gifts"])
+v.set_category_rule("Netflix", "streaming")
 v.close()
 
 v = Vault.open("~/finance/MyVault.db")   # encryption is detected automatically
 ```
 
-Calling `ask_password()` up front is optional — `create` and `open` prompt on their own
-when they need a password and none is remembered. `forget_password()` clears the
-remembered password immediately.
+No call changes when things are encrypted: there is no password argument, no
+decrypting step, and no plaintext copy to remember to delete. Leave `encrypted`
+off and the vault is a plain SQLite file, readable by any SQLite tool, with no
+prompt.
 
-Leave `encrypted` off and the vault is a plain SQLite file, readable by any SQLite
-tool, and never involves a password or a prompt.
+### Statement CSVs
 
-## Encrypted statement CSVs
-
-The raw statement CSVs are the source of truth, which makes them the most sensitive
-files you have — worth keeping in a (private) git repository, and worth encrypting at
-rest. Encrypt each statement once, then read it forever without touching its bytes:
+Statement CSVs can be encrypted too. Encrypt each one once, then read it
+without changing its bytes:
 
 ```python
 import pandas as pd
 from goblinvest_core import encrypt_file, read_encrypted_file
 
-encrypt_file("statements/chase_2026-06.csv")        # once, when the statement arrives
+encrypt_file("statements/chase_2026-06.csv")        # once, when it arrives
 
 df = pd.read_csv(read_encrypted_file("statements/chase_2026-06.csv"))   # ever after
 ```
 
-`read_encrypted_file` decrypts into memory only — the file on disk never changes, so
-git never sees phantom modifications, no matter how many times your rebuild script
-runs.
+`read_encrypted_file` decrypts into memory only, so a git repository of
+encrypted statements stays clean however often your load script runs. To edit a
+file, `decrypt_file` it in place, then `encrypt_file` it again. A wrong password
+or a damaged file gives a clear error rather than garbage rows.
 
-Encrypted files are built to be hard to break by accident. They are stored as plain
-text, so the small liberties other programs take with text files — an editor adding a
-newline when you save, git changing line endings between operating systems — do no
-harm. And if a file really is damaged, or you type the wrong password, you get a
-clear error instead of garbage rows loading into your vault.
-
-It is the same password as the vault, remembered for the same 15 minutes: one
-`ask_password()` covers loading a hundred statements.
-
-Need to fix a bad row? `decrypt_file` writes the plaintext back in place — edit it,
-then `encrypt_file` again:
-
-```python
-from goblinvest_core import decrypt_file
-
-decrypt_file("statements/chase_2026-06.csv")
-# ...fix the row in your editor...
-encrypt_file("statements/chase_2026-06.csv")
-```
+Encrypted files are stored as plain text, so the liberties other programs take
+with text files — an editor adding a newline, git converting line endings — do
+no harm.
 
 ??? note "Technical details"
 
-    An encrypted file is a `GVENC1` header line followed by the encrypted payload as
+    An encrypted file is a `GVENC1` header line followed by the payload as
     base64 text (like PGP's "ASCII armor"); reading strips all whitespace before
-    decoding, which is why editors and line-ending conversions can't hurt it. The
-    payload is a 16-byte salt, a 12-byte nonce, and AES-256-GCM ciphertext — GCM's
-    built-in integrity tag is what turns a wrong password or a damaged file into a
-    clean error. The key is derived from your password with PBKDF2-HMAC-SHA256
-    (600,000 iterations) and cached in memory; files encrypted in the same session
-    share one salt, so a script reading hundreds of statements pays the deliberately
-    slow key derivation once, not per file.
+    decoding, which is why editors and line-ending conversions cannot hurt it.
+    The payload is a 16-byte salt, a 12-byte nonce, and AES-256-GCM ciphertext,
+    whose integrity tag is what turns a wrong password or a damaged file into a
+    clean error. The key is derived with PBKDF2-HMAC-SHA256 (600,000
+    iterations) and cached in memory; files encrypted in one session share a
+    salt, so the deliberately slow derivation is paid once per session rather
+    than once per file.
 
-See the [examples](examples.md) for a complete statements-to-net-worth script, and the
-[API reference](api.md) for every function, its inputs, and its outputs.
+## Next
+
+See the [examples](examples.md) for a complete statements-to-net-worth script,
+and the [API reference](api.md) for every function, its inputs, and its outputs.
