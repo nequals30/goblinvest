@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block main_class %}auth{% endblock %}
+
+{% block content %}
+<div class="auth-card">
+  <h1>Goblinvest</h1>
+  <div class="tabs">
+    <a class="tab {% if mode == 'login' %}is-active{% endif %}" href="/login">log in</a>
+    <a class="tab {% if mode == 'signup' %}is-active{% endif %}" href="/signup">sign up</a>
+  </div>
+
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+  <form method="post" action="/{{ mode }}">
+    <label>
+      username
+      <input type="text" name="username" value="{{ username|default('') }}" required
+             autocomplete="username" autofocus />
+    </label>
+    <label>
+      password
+      <input type="password" name="password" required
+             autocomplete="{% if mode == 'signup' %}new-password{% else %}current-password{% endif %}" />
+    </label>
+    {% if mode == 'signup' %}<p class="hint">At least 8 characters.</p>{% endif %}
+    <button type="submit">{{ submit }}</button>
+  </form>
+</div>
+{% endblock %}

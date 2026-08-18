@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}Goblinvest{% endblock %}</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    {% if user %}
+    <header id="topbar">
+      <span class="brand">Goblinvest</span>
+      <nav></nav>
+      <span class="who">{{ user.username }}</span>
+      <form method="post" action="/logout"><button type="submit">log out</button></form>
+    </header>
+    {% endif %}
+
+    <main class="{% block main_class %}{% endblock %}">{% block content %}{% endblock %}</main>
+  </body>
+</html>
