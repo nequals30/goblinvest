@@ -30,7 +30,7 @@ def test_signup_sets_cookie_provisions_storage_and_lands_on_welcome(client):
     assert r.url.path == "/"
     assert "Welcome, goblin" in r.text
     assert client.cookies.get(SESSION_COOKIE)
-    assert storage.statements_dir(1).is_dir()
+    assert storage.raw_data_dir(1).is_dir()
 
 
 def test_welcome_shows_logout_and_username(signed_up):
@@ -132,6 +132,6 @@ def test_two_users_get_separate_directories(client):
     client.cookies.clear()
     client.post("/signup", data={"username": "two", "password": "hoardgold"})
 
-    assert storage.statements_dir(1).is_dir()
-    assert storage.statements_dir(2).is_dir()
+    assert storage.raw_data_dir(1).is_dir()
+    assert storage.raw_data_dir(2).is_dir()
     assert storage.user_dir(1) != storage.user_dir(2)

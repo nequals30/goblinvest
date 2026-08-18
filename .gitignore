@@ -6,6 +6,6 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
-# App-managed runtime state: users db + per-user vaults, adjustments, statements
+# App-managed runtime state: users db + per-user vaults, adjustments, raw data
 data/
 *.db

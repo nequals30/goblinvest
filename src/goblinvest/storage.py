@@ -5,7 +5,7 @@
       users/<user_id>/
         vault.db              # created when goblinvest-core is wired in
         vault_adjustments/    # ditto
-        statements/           # the user's statement CSVs
+        raw_data/             # the user's statement CSVs, one folder per account
 
 Nothing here imports goblinvest_core or knows anything about finance — it only
 owns the layout. `vault.db` and `vault_adjustments/` are named, not created:
@@ -18,7 +18,7 @@ from pathlib import Path
 from goblinvest.config import settings
 
 VAULT_FILENAME = "vault.db"
-STATEMENTS_DIRNAME = "statements"
+RAW_DATA_DIRNAME = "raw_data"
 
 
 def user_dir(user_id: int) -> Path:
@@ -34,11 +34,13 @@ def adjustments_dir(user_id: int) -> Path:
     return user_dir(user_id) / f"{Path(VAULT_FILENAME).stem}_adjustments"
 
 
-def statements_dir(user_id: int) -> Path:
-    return user_dir(user_id) / STATEMENTS_DIRNAME
+def raw_data_dir(user_id: int) -> Path:
+    """Where the user's own statement CSVs live — the source of truth the vault
+    is rebuilt from."""
+    return user_dir(user_id) / RAW_DATA_DIRNAME
 
 
 def provision_user_storage(user_id: int) -> Path:
     """Create the directories a new user needs. Idempotent."""
-    statements_dir(user_id).mkdir(parents=True, exist_ok=True)
+    raw_data_dir(user_id).mkdir(parents=True, exist_ok=True)
     return user_dir(user_id)
