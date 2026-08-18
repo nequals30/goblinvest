@@ -13,6 +13,7 @@ from goblinvest.auth import NotAuthenticated
 from goblinvest.db import init_db
 from goblinvest.routes import auth as auth_routes
 from goblinvest.routes import pages
+from goblinvest.routes import settings as settings_routes
 from goblinvest.templates import STATIC_DIR
 
 
@@ -31,6 +32,7 @@ def create_app() -> FastAPI:
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     app.include_router(auth_routes.router)
+    app.include_router(settings_routes.router)
     app.include_router(pages.router)
     return app
 

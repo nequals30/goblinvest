@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Account · Goblinvest{% endblock %}
+
+{% block content %}
+<p class="crumb"><a href="/settings">Settings</a> / Account</p>
+<h1>Account</h1>
+
+<p class="muted">Signed in as <strong>{{ user.username }}</strong>. Usernames can't be changed.</p>
+
+<section class="pane">
+  <h2>Change password</h2>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  {% if changed %}<div class="notice">Password changed. Other sessions were signed out.</div>{% endif %}
+
+  <form method="post" action="/settings/account/password" class="narrow">
+    <label>
+      current password
+      <input type="password" name="current_password" required autocomplete="current-password" />
+    </label>
+    <label>
+      new password
+      <input type="password" name="new_password" required autocomplete="new-password" />
+    </label>
+    <label>
+      confirm new password
+      <input type="password" name="confirm_password" required autocomplete="new-password" />
+    </label>
+    <p class="hint">At least {{ min_password }} characters.</p>
+    <button type="submit">change password</button>
+  </form>
+</section>
+{% endblock %}

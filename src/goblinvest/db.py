@@ -28,6 +28,19 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS nav_items (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    slug     TEXT NOT NULL,
+    label    TEXT NOT NULL,
+    kind     TEXT NOT NULL CHECK (kind IN ('builtin', 'dashboard')),
+    position INTEGER NOT NULL,
+    hidden   INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(user_id, slug)
+);
+
+CREATE INDEX IF NOT EXISTS idx_nav_items_user ON nav_items(user_id, position);
 """
 
 
@@ -100,3 +113,86 @@ def insert_session(conn: sqlite3.Connection, token: str, user_id: int, ttl_days:
 
 def delete_session(conn: sqlite3.Connection, token: str) -> None:
     conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+
+
+def delete_other_sessions(conn: sqlite3.Connection, user_id: int, keep_token: str) -> None:
+    """Log the user out everywhere but here — used after a password change."""
+    conn.execute(
+        "DELETE FROM sessions WHERE user_id = ? AND token <> ?",
+        (user_id, keep_token),
+    )
+
+
+def update_password(conn: sqlite3.Connection, user_id: int, password_hash: str) -> None:
+    conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id))
+
+
+# --- left-pane nav items ----------------------------------------------------
+
+
+def list_nav_rows(conn: sqlite3.Connection, user_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT id, slug, label, kind, position, hidden
+        FROM nav_items WHERE user_id = ? ORDER BY position, id
+        """,
+        (user_id,),
+    ).fetchall()
+
+
+def find_nav_row(conn: sqlite3.Connection, user_id: int, item_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT id, slug, label, kind, position, hidden
+        FROM nav_items WHERE user_id = ? AND id = ?
+        """,
+        (user_id, item_id),
+    ).fetchone()
+
+
+def find_nav_row_by_slug(conn: sqlite3.Connection, user_id: int, slug: str) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT id, slug, label, kind, position, hidden
+        FROM nav_items WHERE user_id = ? AND slug = ?
+        """,
+        (user_id, slug),
+    ).fetchone()
+
+
+def insert_nav_item(
+    conn: sqlite3.Connection, user_id: int, slug: str, label: str, kind: str, position: int
+) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO nav_items(user_id, slug, label, kind, position)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (user_id, slug, label, kind, position),
+    )
+    return int(cur.lastrowid)
+
+
+def next_nav_position(conn: sqlite3.Connection, user_id: int) -> int:
+    row = conn.execute(
+        "SELECT COALESCE(MAX(position), -1) AS p FROM nav_items WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    return int(row["p"]) + 1
+
+
+def set_nav_position(conn: sqlite3.Connection, user_id: int, item_id: int, position: int) -> None:
+    conn.execute(
+        "UPDATE nav_items SET position = ? WHERE user_id = ? AND id = ?",
+        (position, user_id, item_id),
+    )
+
+
+def set_nav_hidden(conn: sqlite3.Connection, user_id: int, item_id: int, hidden: bool) -> None:
+    conn.execute(
+        "UPDATE nav_items SET hidden = ? WHERE user_id = ? AND id = ?",
+        (1 if hidden else 0, user_id, item_id),
+    )
+
+
+def delete_nav_item(conn: sqlite3.Connection, user_id: int, item_id: int) -> None:
+    conn.execute("DELETE FROM nav_items WHERE user_id = ? AND id = ?", (user_id, item_id))

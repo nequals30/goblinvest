@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Left pane · Goblinvest{% endblock %}
+
+{% block content %}
+<p class="crumb"><a href="/settings">Settings</a> / Left pane</p>
+<h1>Left pane</h1>
+
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+<section class="pane">
+  <h2>Order and visibility</h2>
+  <table class="grid">
+    <thead>
+      <tr>
+        <th class="c-move">move</th>
+        <th>item</th>
+        <th>page</th>
+        <th>type</th>
+        <th class="c-act">shown</th>
+        <th class="c-act"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in items %}
+      <tr class="{% if item.hidden %}is-hidden{% endif %}">
+        <td class="c-move">
+          <form method="post" action="/settings/nav/{{ item.id }}/move">
+            <input type="hidden" name="direction" value="up" />
+            <button type="submit" title="move up" {% if loop.first %}disabled{% endif %}>↑</button>
+          </form>
+          <form method="post" action="/settings/nav/{{ item.id }}/move">
+            <input type="hidden" name="direction" value="down" />
+            <button type="submit" title="move down" {% if loop.last %}disabled{% endif %}>↓</button>
+          </form>
+        </td>
+        <td>{{ item.label }}</td>
+        <td><a href="{{ item.url }}">{{ item.url }}</a></td>
+        <td class="muted">{{ item.kind }}</td>
+        <td class="c-act">
+          <form method="post" action="/settings/nav/{{ item.id }}/visibility">
+            <input type="hidden" name="hidden" value="{{ 0 if item.hidden else 1 }}" />
+            <button type="submit">{{ "show" if item.hidden else "hide" }}</button>
+          </form>
+        </td>
+        <td class="c-act">
+          {% if item.deletable %}
+          <form method="post" action="/settings/nav/{{ item.id }}/delete">
+            <button type="submit" class="danger">delete</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="hint">Built-in items can be hidden but not deleted.</p>
+</section>
+
+<section class="pane">
+  <h2>New dashboard</h2>
+  <form method="post" action="/settings/nav/dashboards" class="row">
+    <label>
+      name
+      <input type="text" name="label" maxlength="{{ max_label }}" required
+             placeholder="Retirement" />
+    </label>
+    <button type="submit">add to left pane</button>
+  </form>
+  <p class="hint">Blank for now — a place to hang charts once the vault is wired in.</p>
+</section>
+{% endblock %}

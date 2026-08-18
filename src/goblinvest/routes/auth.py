@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Form, Request, status
 from fastapi.responses import RedirectResponse
 
-from goblinvest import auth, db, storage
+from goblinvest import auth, db, nav, storage
 from goblinvest.auth import Conn, MaybeUser
 from goblinvest.templates import templates
 
@@ -96,6 +96,8 @@ def signup(request: Request, conn: Conn, username: Username, password: Password)
         return _form_error(
             request, "signup.html", "Could not set up your files. Try again.", username
         )
+
+    nav.ensure_builtins(conn, user_id)
 
     token = auth.create_session(conn, user_id)
     response = _redirect("/")
