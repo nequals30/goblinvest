@@ -649,8 +649,22 @@ class Vault:
                 rows,
             )
 
-    def list_transactions(self) -> pd.DataFrame:
-        """Return the whole ledger, with account and asset details joined in.
+    def list_transactions(
+        self,
+        *,
+        start_date: datetime.date | str | None = None,
+        end_date: datetime.date | str | None = None,
+    ) -> pd.DataFrame:
+        """Return the ledger, with account and asset details joined in.
+
+        Without arguments this returns every transaction. Give a start date, an
+        end date, or both to narrow it to a date range.
+
+        Args:
+            start_date: Earliest date to include, as a ``datetime.date`` object
+                or a ``"YYYY-MM-DD"`` string. Included in the result.
+            end_date: Latest date to include, same formats. Included in the
+                result.
 
         Returns:
             A pandas ``DataFrame`` with one row per transaction, sorted by
@@ -673,18 +687,36 @@ class Vault:
             # 0               1     checking 2026-07-01  WHOLEFDS #123   -40.00   USD     groceries              1.0               cash
             # 1               2    brokerage 2026-07-02        buy VTI -1000.00   USD  unclassified              1.0        investments
             # 2               3    brokerage 2026-07-02        buy VTI     3.20   VTI  unclassified              1.0        investments
+
+            v.list_transactions(start_date="2026-07-02")
+            #    transaction_id account_name       date description   amount asset      category  ownership_share account_group_name
+            # 0               2    brokerage 2026-07-02     buy VTI -1000.00   USD  unclassified              1.0        investments
+            # 1               3    brokerage 2026-07-02     buy VTI     3.20   VTI  unclassified              1.0        investments
             ```
         """
+        # Dates are stored as "YYYY-MM-DD" text, which sorts and compares
+        # correctly as-is, so the bounds only need the same formatting.
+        where = []
+        params: list[str] = []
+        if start_date is not None:
+            where.append("trans_date >= ?")
+            params.append(pd.Timestamp(start_date).strftime("%Y-%m-%d"))
+        if end_date is not None:
+            where.append("trans_date <= ?")
+            params.append(pd.Timestamp(end_date).strftime("%Y-%m-%d"))
+
         df = self._read_df(
-            """
+            f"""
             SELECT trans_id, account_name, trans_date, trans_desc, amount,
                    asset_name, category_name, ownership_share, account_group_name
             FROM transactions
             LEFT JOIN accounts ON accounts.account_id = transactions.account_id
             LEFT JOIN assets ON assets.asset_id = transactions.asset_id
             LEFT JOIN categories ON categories.category_id = transactions.category_id
+            {"WHERE " + " AND ".join(where) if where else ""}
             ORDER BY trans_date, account_name
-            ;"""
+            ;""",
+            tuple(params),
         )
         df.columns = [
             "transaction_id",
@@ -1562,3 +1594,51 @@ class Vault:
 
         held["market_value"] = (held["units"] * held["price"] * held["ownership_share"]).round(2)
         return held.sort_values(["account_name", "asset"]).reset_index(drop=True)[columns]
+
+    def summarize_vault(self) -> dict[str, object]:
+        """Return how much the vault holds and the dates its ledger spans.
+
+        Returns:
+            A dict with keys:
+
+            - ``n_transactions`` — rows in the ledger
+            - ``n_accounts`` — registered accounts, including any with no transactions
+            - ``n_assets`` — registered assets, the base currency included
+            - ``n_categories`` — defined categories, as ``list_categories()`` reports them
+            - ``n_uncategorized`` — transactions still ``"unclassified"``
+            - ``first_transaction`` — date of the earliest transaction
+            - ``last_transaction`` — date of the most recent transaction
+
+            On an empty vault the counts are zero and both dates are ``NaT``.
+
+        Examples:
+            ```python
+            v.summarize_vault()
+            # {'n_transactions': 1215,
+            #  'n_accounts': 6,
+            #  'n_assets': 9,
+            #  'n_categories': 12,
+            #  'n_uncategorized': 84,
+            #  'first_transaction': Timestamp('2016-01-04 00:00:00'),
+            #  'last_transaction': Timestamp('2026-08-18 00:00:00')}
+            ```
+        """
+        row = self._read_df(
+            """
+            SELECT (SELECT COUNT(*) FROM transactions) AS n_transactions,
+                   (SELECT COUNT(*) FROM accounts) AS n_accounts,
+                   (SELECT COUNT(*) FROM assets) AS n_assets,
+                   (SELECT COUNT(*) FROM categories) AS n_categories,
+                   (SELECT COUNT(*) FROM transactions WHERE category_id IS NULL)
+                       AS n_uncategorized,
+                   (SELECT MIN(trans_date) FROM transactions) AS first_transaction,
+                   (SELECT MAX(trans_date) FROM transactions) AS last_transaction
+            ;"""
+        ).iloc[0]
+        # int() because sqlite counts arrive as numpy integers.
+        summary: dict[str, object] = {
+            name: int(row[name]) for name in row.index if name.startswith("n_")
+        }
+        summary["first_transaction"] = pd.to_datetime(row["first_transaction"])
+        summary["last_transaction"] = pd.to_datetime(row["last_transaction"])
+        return summary

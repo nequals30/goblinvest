@@ -1,3 +1,4 @@
+import datetime
 import sqlite3
 import time
 
@@ -251,6 +252,61 @@ class TestTransactions:
         df = vault.list_transactions()
         assert len(df) == 0
         assert "transaction_id" in df.columns
+
+
+class TestListTransactionsDateRange:
+    @pytest.fixture
+    def vault(self, filepath):
+        with Vault.create(filepath) as v:
+            v.add_account("checking")
+            v.add_transactions(
+                "checking",
+                ["2026-07-01", "2026-07-15", "2026-07-31", "2026-08-01"],
+                ["a", "b", "c", "d"],
+                [1.0, 2.0, 3.0, 4.0],
+            )
+            yield v
+
+    def test_start_date_only(self, vault):
+        df = vault.list_transactions(start_date="2026-07-15")
+        assert df["description"].tolist() == ["b", "c", "d"]
+
+    def test_end_date_only(self, vault):
+        df = vault.list_transactions(end_date="2026-07-15")
+        assert df["description"].tolist() == ["a", "b"]
+
+    def test_both_bounds_are_inclusive(self, vault):
+        df = vault.list_transactions(start_date="2026-07-01", end_date="2026-07-31")
+        assert df["description"].tolist() == ["a", "b", "c"]
+
+    def test_date_objects_work_too(self, vault):
+        df = vault.list_transactions(
+            start_date=datetime.date(2026, 7, 15),
+            end_date=datetime.date(2026, 7, 31),
+        )
+        assert df["description"].tolist() == ["b", "c"]
+
+    def test_no_bounds_returns_everything(self, vault):
+        assert len(vault.list_transactions()) == 4
+
+    def test_range_matching_nothing_returns_empty_frame(self, vault):
+        df = vault.list_transactions(start_date="2027-01-01", end_date="2027-12-31")
+        assert len(df) == 0
+        assert list(df.columns) == list(vault.list_transactions().columns)
+
+    def test_backwards_range_returns_empty_frame(self, vault):
+        df = vault.list_transactions(start_date="2026-07-31", end_date="2026-07-01")
+        assert len(df) == 0
+
+    def test_range_is_keyword_only(self, vault):
+        with pytest.raises(TypeError):
+            vault.list_transactions("2026-07-01")
+
+    def test_other_columns_survive_filtering(self, vault):
+        df = vault.list_transactions(start_date="2026-08-01")
+        assert df["date"].tolist() == [pd.Timestamp("2026-08-01")]
+        assert df["asset"].tolist() == ["USD"]
+        assert df["category"].tolist() == ["unclassified"]
 
 
 def _yahoo_history(rows):
@@ -566,6 +622,79 @@ class TestAnalytics:
         latest_mv = vault.accumulate_mv().iloc[-1]
         for row in vault.summarize_accounts().itertuples():
             assert latest_mv[f"{row.account_name}::{row.asset}"] == pytest.approx(row.market_value)
+
+
+class TestSummarizeVault:
+    @pytest.fixture
+    def vault(self, tmp_path):
+        with Vault.create(tmp_path / "Vault.db", adjustments_dir=tmp_path / "adjustments") as v:
+            v.create_category(["groceries", "income"])
+            v.add_account("checking", account_group_name="cash")
+            v.add_account("brokerage", account_group_name="investments")
+            v.add_asset("NVDA")
+            v.add_transactions(
+                ["checking", "checking", "brokerage", "brokerage"],
+                ["2024-06-03", "2024-06-04", "2024-06-05", "2024-06-05"],
+                ["paycheck", "WHOLEFDS #123", "buy NVDA", "buy NVDA"],
+                [1000.0, -40.0, -240.0, 2.0],
+                assets=["USD", "USD", "USD", "NVDA"],
+            )
+            v.apply_categories()
+            yield v
+
+    def test_keys_and_their_order(self, vault):
+        assert list(vault.summarize_vault()) == [
+            "n_transactions",
+            "n_accounts",
+            "n_assets",
+            "n_categories",
+            "n_uncategorized",
+            "first_transaction",
+            "last_transaction",
+        ]
+
+    def test_counts(self, vault):
+        summary = vault.summarize_vault()
+        assert summary["n_transactions"] == 4
+        assert summary["n_accounts"] == 2
+        assert summary["n_assets"] == 2  # USD and NVDA
+        assert summary["n_categories"] == 2  # defined, none assigned to anything yet
+        assert summary["n_uncategorized"] == 4
+
+    def test_counts_are_plain_ints(self, vault):
+        # numpy integers would not survive json.dumps.
+        counts = [v for k, v in vault.summarize_vault().items() if k.startswith("n_")]
+        assert all(type(count) is int for count in counts)
+
+    def test_category_count_matches_list_categories(self, vault):
+        assert vault.summarize_vault()["n_categories"] == len(vault.list_categories())
+
+    def test_date_span(self, vault):
+        summary = vault.summarize_vault()
+        assert summary["first_transaction"] == pd.Timestamp("2024-06-03")
+        assert summary["last_transaction"] == pd.Timestamp("2024-06-05")
+
+    def test_accounts_without_transactions_still_count(self, vault):
+        vault.add_account("savings")
+        assert vault.summarize_vault()["n_accounts"] == 3
+
+    def test_categorizing_shrinks_the_uncategorized_count(self, vault):
+        vault.set_category_rule("WHOLEFDS #123", "groceries")
+
+        summary = vault.summarize_vault()
+        assert summary["n_uncategorized"] == 3
+        assert summary["n_categories"] == 2  # unchanged: it counts definitions, not use
+
+    def test_empty_vault(self, filepath):
+        with Vault.create(filepath) as v:
+            summary = v.summarize_vault()
+            assert summary["n_transactions"] == 0
+            assert summary["n_accounts"] == 0
+            assert summary["n_assets"] == 1  # the base currency is there from the start
+            assert summary["n_categories"] == 0
+            assert summary["n_uncategorized"] == 0
+            assert summary["first_transaction"] is pd.NaT
+            assert summary["last_transaction"] is pd.NaT
 
 
 class TestEncrypted:

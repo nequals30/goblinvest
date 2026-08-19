@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Month View · Goblinvest{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Month View</h1>
+
+  {% if years %}
+  {# One GET form: the two selects carry the month, the ‹ › buttons submit a
+     step relative to it. Works with JavaScript off; the selects just need the
+     fallback "go" button then. #}
+  <form class="picker" method="get" action="/month">
+    <button type="submit" name="step" value="-1" class="step"
+            title="previous month" {% if not has_older %}disabled{% endif %}>‹</button>
+
+    <label class="sr-only" for="mo">month</label>
+    <select id="mo" name="mo" data-autosubmit>
+      {% for number, name in month_names %}
+      <option value="{{ number }}" {% if number == selected.month %}selected{% endif %}>
+        {{ name }}
+      </option>
+      {% endfor %}
+    </select>
+
+    <label class="sr-only" for="y">year</label>
+    <select id="y" name="y" data-autosubmit>
+      {% for year in years %}
+      <option value="{{ year }}" {% if year == selected.year %}selected{% endif %}>
+        {{ year }}
+      </option>
+      {% endfor %}
+    </select>
+
+    <button type="submit" class="go" data-nojs>go</button>
+
+    <button type="submit" name="step" value="1" class="step"
+            title="next month" {% if not has_newer %}disabled{% endif %}>›</button>
+  </form>
+  {% endif %}
+</div>
+
+{% if no_vault %}
+<p class="muted">No vault yet. It's created when you sign up — this account predates that.</p>
+{% elif not years %}
+<p class="muted">No transactions yet. Import some statements and they'll show up here.</p>
+{% else %}
+
+<div class="table-wrap">
+  <table class="grid sortable dense" data-page-size="100">
+    <thead>
+      <tr>
+        <th data-type="date">date</th>
+        <th data-type="text">account</th>
+        <th data-type="text">description</th>
+        <th data-type="number" class="num">amount</th>
+        <th data-type="text">asset</th>
+        <th data-type="text">category</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td data-sort="{{ row.date.isoformat() }}">{{ row.date.strftime("%b %-d") }}</td>
+        <td>{{ row.account }}</td>
+        <td class="desc">{{ row.description }}</td>
+        <td class="num {% if row.amount < 0 %}neg{% endif %}"
+            data-sort="{{ row.amount }}">{{ "{:,.2f}".format(row.amount) }}</td>
+        <td>{{ row.asset }}</td>
+        <td class="{% if row.category == 'unclassified' %}muted{% endif %}">{{ row.category }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if not rows %}
+  <p class="muted">No transactions in {{ selected.label }}.</p>
+  {% endif %}
+  <p class="hint">{{ rows|length }} transaction{{ "" if rows|length == 1 else "s" }}. Click a column to sort.</p>
+</div>
+{% endif %}
+{% endblock %}

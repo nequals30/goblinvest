@@ -132,6 +132,111 @@ table.grid button:hover:enabled { background: var(--bg); }
 table.grid button:disabled { opacity: 0.35; cursor: default; }
 table.grid button.danger { color: var(--error); }
 
+/* visually hidden, still read by screen readers */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* page header with an inline control on the right */
+.page-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.page-head h1 { margin: 0; }
+.picker { display: flex; align-items: center; gap: 4px; }
+.picker select {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--fg);
+  padding: 4px 5px;
+  font-size: 13px;
+}
+.picker button {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.picker button:hover:enabled { background: var(--bg); }
+.picker button:disabled { opacity: 0.35; cursor: default; }
+/* Generous hit area — these get clicked far more than anything else here. */
+.picker button.step { padding: 0 11px; align-self: stretch; font-size: 15px; }
+.picker button.go { padding: 4px 9px; }
+
+/* data tables */
+.table-wrap {
+  width: 75%;
+  min-width: 620px;
+  max-width: 100%;
+  overflow-x: auto;
+  margin-bottom: 28px;
+}
+table.grid.dense td { padding: 2px 6px; }
+table.grid td.desc { white-space: normal; min-width: 22ch; }
+table.grid .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+table.grid td.neg { color: var(--error); }
+table.grid tbody tr:hover { background: var(--bg); }
+
+/* header row: reads as a header, and the whole cell is the click target */
+table.grid thead th {
+  background: #ebebe7;
+  border-bottom: 1px solid var(--muted);
+  color: var(--fg);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+/* The button fills the cell rather than sitting inside it: same big target as
+   making the <th> clickable, but keyboard focus and Enter still work for free. */
+table.grid thead th.is-sortable { padding: 0; }
+table.grid th .sort-btn {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: none;
+  padding: 5px 6px;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+table.grid th.num .sort-btn { text-align: right; }
+table.grid th .sort-btn:hover { background: var(--border); }
+table.grid th .sort-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+table.grid th[aria-sort] .sort-btn::after { content: " ⇅"; opacity: 0.3; }
+table.grid th[aria-sort="ascending"] .sort-btn::after { content: " ↑"; opacity: 1; }
+table.grid th[aria-sort="descending"] .sort-btn::after { content: " ↓"; opacity: 1; }
+
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.pager button {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--fg);
+  padding: 1px 7px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.pager button:disabled { opacity: 0.35; cursor: default; }
+
 form.narrow { max-width: 280px; }
 form.row { display: flex; gap: 8px; align-items: flex-end; }
 form.row label { margin-bottom: 0; }

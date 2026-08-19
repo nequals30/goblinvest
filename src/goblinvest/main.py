@@ -20,6 +20,12 @@ from goblinvest.templates import STATIC_DIR
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    # Importing core pulls in pandas, which costs ~330ms. Pay it at boot so the
+    # first page load doesn't; without this, the first /month is 340ms and every
+    # one after it is 7ms, which reads as "the app is slow" on exactly the
+    # request a person is most likely to notice.
+    import goblinvest_core  # noqa: F401
+
     yield
 
 

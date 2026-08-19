@@ -34,5 +34,8 @@
 
       <main class="{% block main_class %}{% endblock %}">{% block content %}{% endblock %}</main>
     </div>
+
+    <!-- Local, versionless, no CDN. Deferred so it never blocks the render. -->
+    <script src="/static/app.js" defer></script>
   </body>
 </html>

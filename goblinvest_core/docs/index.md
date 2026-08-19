@@ -70,6 +70,20 @@ v.list_transactions()
 # 1               2    brokerage 2026-07-02     buy VTI     3.20   VTI              1.0        investments
 ```
 
+`summarize_vault` counts what the vault holds and shows the dates its ledger
+spans:
+
+```python
+v.summarize_vault()
+# {'n_transactions': 1215,
+#  'n_accounts': 6,
+#  'n_assets': 9,
+#  'n_categories': 12,
+#  'n_uncategorized': 84,
+#  'first_transaction': Timestamp('2016-01-04 00:00:00'),
+#  'last_transaction': Timestamp('2026-08-18 00:00:00')}
+```
+
 ## Market prices
 
 Name an asset with its Yahoo Finance ticker symbol and its daily closing prices

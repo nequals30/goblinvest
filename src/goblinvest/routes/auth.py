@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Form, Request, status
 from fastapi.responses import RedirectResponse
 
-from goblinvest import auth, db, nav, storage
+from goblinvest import auth, db, nav, storage, vaults
 from goblinvest.auth import Conn, MaybeUser
 from goblinvest.templates import templates
 
@@ -89,6 +89,9 @@ def signup(request: Request, conn: Conn, username: Username, password: Password)
 
     try:
         storage.provision_user_storage(user_id)
+        # Unencrypted: core can only take a password from a getpass prompt, and
+        # there's no terminal here (request #1). Also creates vault_adjustments/.
+        vaults.create_vault(user_id)
     except OSError:
         # Don't leave a user who has no home on disk.
         db.delete_user(conn, user_id)
