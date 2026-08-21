@@ -41,7 +41,7 @@ def _resolve_categories(
         where = f" in {source}" if source else ""
         raise ValueError(
             f"These categories are not defined{where}: {', '.join(missing)}. "
-            "Define them with create_category first (or fix the spelling)."
+            "Define them with add_category first (or fix the spelling)."
         )
     return resolved
 

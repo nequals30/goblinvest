@@ -30,6 +30,11 @@ plugins:
             separate_signature: true
             show_signature_annotations: true
             filters: ["!^_"]
+            # The API reference groups Vault's methods under headings of its
+            # own, one directive per method, so a method's heading is an h3
+            # named for the method alone rather than its full dotted path.
+            heading_level: 3
+            show_root_full_path: false
 
 nav:
   - Overview: index.md

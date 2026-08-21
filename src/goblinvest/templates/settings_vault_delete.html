@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Delete {{ kind.noun }} · Goblinvest{% endblock %}
+
+{% block content %}
+<p class="crumb">
+  <a href="/settings">Settings</a> / <a href="{{ kind.url }}">{{ kind.title }}</a> / delete
+</p>
+<h1>Delete {{ kind.noun }} “{{ item_name }}”?</h1>
+
+<section class="danger-zone">
+  <h2>⚠ This cannot be undone</h2>
+  {% if note %}<p class="danger-note">{{ note }}</p>{% endif %}
+  <ul>
+    {% for line in kind.consequences %}<li>{{ line }}</li>{% endfor %}
+  </ul>
+  <form method="post" action="{{ kind.url }}/delete" class="actions">
+    <input type="hidden" name="name" value="{{ item_name }}" />
+    <button type="submit" class="confirm-delete">Yes, delete “{{ item_name }}”</button>
+    <a href="{{ kind.url }}">Cancel</a>
+  </form>
+</section>
+{% endblock %}

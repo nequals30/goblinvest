@@ -46,6 +46,29 @@ def _no_prompt(monkeypatch):
     monkeypatch.setattr(_password, "getpass", boom)
 
 
+def _answers(monkeypatch, *replies):
+    """Make the delete confirmation 'type' these replies, in order. Returns the
+    list the questions land in, so a test can check what was asked."""
+    it = iter(replies)
+    asked = []
+
+    def prompt(question=""):
+        asked.append(question)
+        return next(it)
+
+    monkeypatch.setattr("builtins.input", prompt)
+    return asked
+
+
+def _no_confirmation(monkeypatch):
+    """Make any delete confirmation a test failure."""
+
+    def boom(question=""):
+        raise AssertionError(f"asked for confirmation when it should not have: {question}")
+
+    monkeypatch.setattr("builtins.input", boom)
+
+
 def _categories_file(adjustments_dir):
     return adjustments_dir / "categories.csv"
 
@@ -54,7 +77,7 @@ def _categories_file(adjustments_dir):
 def vault(tmp_path):
     """A vault with its adjustments folder, and the test vocabulary defined."""
     v = Vault.create(tmp_path / "Vault.db", adjustments_dir=tmp_path / "adjustments")
-    v.create_category(CATEGORIES)
+    v.add_category(CATEGORIES)
     v.add_account("checking", account_group_name="cash")
     v.add_account("credit-card", account_group_name="credit")
     v.add_asset("VTI")
@@ -120,7 +143,7 @@ class TestAdjustmentsFolder:
         elsewhere = tmp_path / "statements"
         elsewhere.mkdir()
         with Vault.create(tmp_path / "V.db", adjustments_dir=elsewhere / "adj") as v:
-            v.create_category("groceries")
+            v.add_category("groceries")
         with Vault.open(tmp_path / "V.db") as v:
             assert v.adjustments_dir == elsewhere / "adj"
             v.set_category_rule("anything", "groceries")  # no folder named anywhere
@@ -138,7 +161,7 @@ class TestAdjustmentsFolder:
         home = tmp_path / "finance"
         home.mkdir()
         with Vault.create(home / "V.db", adjustments_dir=home / "adj") as v:
-            v.create_category("groceries")
+            v.add_category("groceries")
         home.rename(tmp_path / "finance-elsewhere")
         with Vault.open(tmp_path / "finance-elsewhere" / "V.db") as v:
             assert v.adjustments_dir == tmp_path / "finance-elsewhere" / "adj"
@@ -217,11 +240,11 @@ class TestEncryptedFolder:
         assert not (tmp_path / "V_adjustments").exists()
 
 
-class TestCreateCategory:
+class TestAddCategory:
     def test_defines_one_and_many(self, tmp_path):
         with Vault.create(tmp_path / "V.db") as v:
-            v.create_category("groceries")
-            v.create_category(["rent", "travel"])
+            v.add_category("groceries")
+            v.add_category(["rent", "travel"])
             assert (
                 _categories_file(v.adjustments_dir).read_text()
                 == "category\ngroceries\nrent\ntravel\n"
@@ -229,35 +252,151 @@ class TestCreateCategory:
 
     def test_is_idempotent(self, tmp_path):
         with Vault.create(tmp_path / "V.db") as v:
-            v.create_category(["rent", "travel"])
+            v.add_category(["rent", "travel"])
             before = _categories_file(v.adjustments_dir).read_text()
-            v.create_category(["rent", "travel"])
-            v.create_category("rent")
+            v.add_category(["rent", "travel"])
+            v.add_category("rent")
             assert _categories_file(v.adjustments_dir).read_text() == before
 
     def test_capitalization_does_not_make_a_new_category(self, tmp_path):
         with Vault.create(tmp_path / "V.db") as v:
-            v.create_category("groceries")
-            v.create_category(["GROCERIES", "Groceries"])
+            v.add_category("groceries")
+            v.add_category(["GROCERIES", "Groceries"])
             assert _categories_file(v.adjustments_dir).read_text() == "category\ngroceries\n"
 
     def test_duplicates_within_one_call_collapse(self, tmp_path):
         with Vault.create(tmp_path / "V.db") as v:
-            v.create_category(["rent", "rent", "Rent"])
+            v.add_category(["rent", "rent", "Rent"])
             assert _categories_file(v.adjustments_dir).read_text() == "category\nrent\n"
 
     def test_rejects_reserved_and_empty(self, vault):
         with pytest.raises(ValueError, match="reserved"):
-            vault.create_category("Unclassified")
+            vault.add_category("Unclassified")
         with pytest.raises(ValueError, match="empty"):
-            vault.create_category(["fine", "  "])
+            vault.add_category(["fine", "  "])
 
     def test_stays_encrypted(self, tmp_path, monkeypatch):
         _typed(monkeypatch, "pw", "pw")
         with Vault.create(tmp_path / "V.db", encrypted=True) as v:
-            v.create_category("groceries")
+            v.add_category("groceries")
             assert _categories_file(v.adjustments_dir).read_bytes().startswith(b"GVENC")
             assert b"groceries" not in _categories_file(v.adjustments_dir).read_bytes()
+
+
+class TestDeleteCategory:
+    @pytest.fixture
+    def categorized(self, vault, adjustments, monkeypatch):
+        """The test vault with a few decisions already made."""
+        _no_confirmation(monkeypatch)
+        vault.set_category_rule(["Netflix", "Steam"], "streaming")
+        vault.set_category_rule("ACME Payroll", "income")
+        vault.set_category_exception("checking", "2026-02-14", "CHECK # 1145", -500.00, "gifts")
+        return vault
+
+    def test_undefines_the_category(self, categorized, adjustments):
+        categorized.delete_category("streaming", confirm=False)
+
+        assert "streaming" not in _categories_file(adjustments).read_text()
+        assert "streaming" not in categorized.list_categories()["category_name"].tolist()
+
+    def test_takes_its_rules_and_unclassifies_their_transactions(self, categorized, adjustments):
+        categorized.delete_category("streaming", confirm=False)
+
+        assert _rules_file(adjustments).read_text() == "pattern,category\nACME Payroll,income\n"
+        categories = _categories_of(categorized)
+        assert categories["Netflix"] == UNCLASSIFIED
+        assert categories["Steam"] == UNCLASSIFIED
+        assert categories["ACME Payroll"] == "income"  # untouched
+
+    def test_takes_its_exceptions_too(self, categorized, adjustments):
+        categorized.delete_category("gifts", confirm=False)
+
+        assert _exceptions_file(adjustments).read_text() == (
+            "account,date,description,amount,asset,category\n"
+        )
+        assert _categories_of(categorized)["CHECK # 1145"] == UNCLASSIFIED
+
+    def test_no_transaction_is_deleted(self, categorized):
+        before = len(categorized.list_transactions())
+        categorized.delete_category(["streaming", "gifts"], confirm=False)
+
+        assert len(categorized.list_transactions()) == before
+
+    def test_a_rebuild_does_not_bring_it_back(self, categorized):
+        categorized.delete_category("streaming", confirm=False)
+        categorized.apply_categories()
+
+        assert _categories_of(categorized)["Netflix"] == UNCLASSIFIED
+
+    def test_many_at_once(self, categorized, adjustments):
+        categorized.delete_category(["streaming", "income"], confirm=False)
+
+        assert _rules_file(adjustments).read_text() == "pattern,category\n"
+        assert _categories_of(categorized)["ACME Payroll"] == UNCLASSIFIED
+
+    def test_question_names_what_goes(self, categorized, monkeypatch):
+        asked = _answers(monkeypatch, "y")
+        categorized.delete_category("streaming")
+
+        assert 'category "streaming"' in asked[0]
+        assert "2 rules" in asked[0]
+        assert "0 exceptions" in asked[0]
+        assert "3 transactions" in asked[0]  # Netflix, Netflix (2), Steam
+
+    def test_question_uses_the_spelling_you_defined(self, categorized, monkeypatch):
+        asked = _answers(monkeypatch, "n")
+        categorized.delete_category("STREAMING")
+
+        assert 'category "streaming"' in asked[0]
+
+    def test_declining_changes_nothing(self, categorized, adjustments, monkeypatch):
+        before = _rules_file(adjustments).read_text()
+        categories_before = _categories_file(adjustments).read_text()
+
+        _answers(monkeypatch, "n")
+        categorized.delete_category("streaming")
+
+        assert _rules_file(adjustments).read_text() == before
+        assert _categories_file(adjustments).read_text() == categories_before
+        assert _categories_of(categorized)["Netflix"] == "streaming"
+
+    def test_names_match_case_insensitively(self, categorized, adjustments):
+        categorized.delete_category("Streaming", confirm=False)
+
+        assert "streaming" not in _categories_file(adjustments).read_text()
+
+    def test_undefined_category_raises_and_writes_nothing(self, categorized, adjustments):
+        before = _categories_file(adjustments).read_text()
+        with pytest.raises(ValueError, match="not defined.*streamign"):
+            categorized.delete_category(["streaming", "streamign"], confirm=False)
+
+        assert _categories_file(adjustments).read_text() == before
+        assert _categories_of(categorized)["Netflix"] == "streaming"
+
+    def test_a_category_nothing_uses_just_goes(self, vault, adjustments, monkeypatch):
+        _no_confirmation(monkeypatch)
+        vault.delete_category("movies", confirm=False)
+
+        assert "movies" not in _categories_file(adjustments).read_text()
+
+    def test_it_can_be_defined_again_afterwards(self, categorized, adjustments):
+        categorized.delete_category("streaming", confirm=False)
+        categorized.add_category("streaming")
+
+        assert "streaming" in _categories_file(adjustments).read_text()
+        # the rule went with it, so the transactions stay unclassified
+        assert _categories_of(categorized)["Netflix"] == UNCLASSIFIED
+
+    def test_stays_encrypted(self, tmp_path, monkeypatch):
+        _typed(monkeypatch, "pw", "pw")
+        with Vault.create(tmp_path / "V.db", encrypted=True) as v:
+            v.add_category(["groceries", "rent"])
+            v.delete_category("groceries", confirm=False)
+
+            raw = _categories_file(v.adjustments_dir).read_bytes()
+            assert raw.startswith(b"GVENC")
+            assert b"rent" not in raw
+            assert v.list_categories()["category_name"].tolist() == ["rent"]
 
 
 class TestUndefinedCategories:
@@ -680,7 +819,7 @@ class TestEncryptedFiles:
             [-15.99, -500.00],
         )
         adjustments = vault.adjustments_dir
-        vault.create_category(["streaming", "gifts"])
+        vault.add_category(["streaming", "gifts"])
 
         vault.apply_categories()
         vault.set_category_rule("Netflix", "streaming")

@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}{{ kind.title }} · Goblinvest{% endblock %}
+
+{% block content %}
+<p class="crumb"><a href="/settings">Settings</a> / {{ kind.title }}</p>
+<h1>{{ kind.title }}</h1>
+
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+{% if deleted %}<div class="notice">Deleted {{ kind.noun }} “{{ deleted }}”.</div>{% endif %}
+
+{% if no_vault %}
+<p class="muted">No vault yet. It's created when you sign up — this account predates that.</p>
+{% else %}
+
+<section class="pane">
+  <table class="grid sortable">
+    <thead>
+      <tr>
+        {% for column in kind.columns %}
+        <th data-type="{{ column.type }}"
+            class="{% if column.type == 'number' %}num{% endif %}">{{ column.label }}</th>
+        {% endfor %}
+        <th class="c-delete"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        {% for cell in row.cells %}
+        <td class="{% if cell.num %}num{% endif %}" data-sort="{{ cell.sort }}">{{ cell.text }}</td>
+        {% endfor %}
+        <td class="c-delete">
+          {% if row.deletable %}
+          <a class="danger" href="{{ kind.url }}/delete?name={{ row.name|urlencode }}">delete</a>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if not rows %}<p class="muted">{{ kind.empty }}</p>{% endif %}
+</section>
+
+<section class="pane">
+  <h2>Add {{ kind.noun }}</h2>
+  <form method="post" action="{{ kind.url }}/add" class="row">
+    {% if kind.slug == "accounts" %}
+    <label>name <input type="text" name="name" required placeholder="checking" /></label>
+    <label>group <input type="text" name="group" placeholder="cash" /></label>
+    <label>share
+      <input type="number" name="share" value="1" min="0" max="1" step="0.01" /></label>
+    <button type="submit">add account</button>
+    {% elif kind.slug == "assets" %}
+    <label>name <input type="text" name="name" required placeholder="VTI" /></label>
+    <button type="submit">add asset</button>
+    {% else %}
+    <label>name <input type="text" name="name" required placeholder="groceries" /></label>
+    <button type="submit">add category</button>
+    {% endif %}
+  </form>
+
+  {% if kind.slug == "accounts" %}
+  <p class="hint">
+    An existing name isn't duplicated — its group and share are updated instead.
+    Share is your fraction of a joint account: 1 for your own, 0.5 for a half.
+  </p>
+  {% elif kind.slug == "assets" %}
+  <p class="hint">
+    Tickers, other currencies, anything a transaction can be denominated in.
+    Adding one twice does nothing.
+  </p>
+  {% else %}
+  <p class="hint">
+    Categories have to be defined before a rule can hand one out, so a misspelling
+    is an error rather than a new category. Capitalization doesn't make a second one.
+  </p>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

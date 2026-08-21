@@ -127,6 +127,17 @@ def _is_scalar(value) -> bool:
     return value is None or isinstance(value, str) or not hasattr(value, "__len__")
 
 
+def _confirmed(question: str) -> bool:
+    """Ask at the terminal before deleting something. Only a plain yes counts,
+    so an empty line or a stray keystroke cancels."""
+    return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+
+
+def _plural(n: int, noun: str) -> str:
+    """`3 transactions`, `1 transaction` — for the confirmation prompts."""
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+
+
 def _broadcast(inputs: dict[str, object]) -> dict[str, list]:
     """Line up parallel inputs, repeating any lone scalar to match the rest.
     All scalars means a single row; mismatched lengths raise."""
@@ -457,6 +468,50 @@ class Vault:
             ;"""
         )
 
+    def delete_account(self, account_name: str, *, confirm: bool = True) -> None:
+        """Delete an account and every transaction in it.
+
+        You are asked to confirm at the terminal first, since the transactions
+        go with it. The vault is rebuildable from your statement CSVs, so the
+        way to undo this is to load them again.
+
+        Args:
+            account_name: The account to delete (capitalization ignored). It
+                must be registered in the vault.
+            confirm: If ``True`` (default), print what will be deleted and wait
+                for a ``y`` at the terminal; anything else cancels and nothing
+                is deleted. Pass ``False`` in a script, which has nobody to ask.
+
+        Returns:
+            Nothing.
+
+        Raises:
+            ValueError: The account is not registered in the vault.
+
+        Examples:
+            ```python
+            v.delete_account("old-checking")
+            # Delete account "old-checking" and its 412 transactions? [y/N]
+
+            v.delete_account("old-checking", confirm=False)   # unattended
+            ```
+        """
+        accounts = self.list_accounts()
+        [account_id] = _ids_from_names(
+            [account_name], accounts["account_name"], accounts["account_id"], "accounts"
+        )
+        name = accounts.loc[accounts["account_id"] == account_id, "account_name"].iloc[0]
+        n_transactions = self._conn.execute(
+            "SELECT COUNT(*) FROM transactions WHERE account_id = ?;", (account_id,)
+        ).fetchone()[0]
+        if confirm and not _confirmed(
+            f'Delete account "{name}" and its {_plural(n_transactions, "transaction")}?'
+        ):
+            return
+        with self._conn:
+            self._conn.execute("DELETE FROM transactions WHERE account_id = ?;", (account_id,))
+            self._conn.execute("DELETE FROM accounts WHERE account_id = ?;", (account_id,))
+
     def add_asset(self, asset_name: str) -> None:
         """Register an asset — anything you can hold an amount of.
 
@@ -513,6 +568,63 @@ class Vault:
             ORDER BY asset_id
             ;"""
         )
+
+    def delete_asset(self, asset_name: str, *, confirm: bool = True) -> None:
+        """Delete an asset, every transaction denominated in it, and its stored
+        prices.
+
+        You are asked to confirm at the terminal first, since the transactions
+        go with it. The vault is rebuildable from your statement CSVs, so the
+        way to undo this is to load them again.
+
+        The base currency (asset 1) cannot be deleted — every other asset is
+        valued in it.
+
+        Args:
+            asset_name: The asset to delete (capitalization ignored). It must
+                be registered in the vault.
+            confirm: If ``True`` (default), print what will be deleted and wait
+                for a ``y`` at the terminal; anything else cancels and nothing
+                is deleted. Pass ``False`` in a script, which has nobody to ask.
+
+        Returns:
+            Nothing.
+
+        Raises:
+            ValueError: The asset is not registered in the vault, or it is the
+                base currency.
+
+        Examples:
+            ```python
+            v.delete_asset("VTI")
+            # Delete asset "VTI", its 37 transactions, and 2,410 stored prices? [y/N]
+            ```
+        """
+        assets = self.list_assets()
+        [asset_id] = _ids_from_names(
+            [asset_name], assets["asset_name"], assets["asset_id"], "assets"
+        )
+        name = assets.loc[assets["asset_id"] == asset_id, "asset_name"].iloc[0]
+        if asset_id == 1:
+            raise ValueError(
+                f"{name} is this vault's base currency, so it cannot be deleted: "
+                "every other asset is valued in it."
+            )
+        n_transactions = self._conn.execute(
+            "SELECT COUNT(*) FROM transactions WHERE asset_id = ?;", (asset_id,)
+        ).fetchone()[0]
+        n_prices = self._conn.execute(
+            "SELECT COUNT(*) FROM prices WHERE asset_id = ?;", (asset_id,)
+        ).fetchone()[0]
+        if confirm and not _confirmed(
+            f'Delete asset "{name}", its {_plural(n_transactions, "transaction")}, '
+            f"and {_plural(n_prices, 'stored price')}?"
+        ):
+            return
+        with self._conn:
+            self._conn.execute("DELETE FROM transactions WHERE asset_id = ?;", (asset_id,))
+            self._conn.execute("DELETE FROM prices WHERE asset_id = ?;", (asset_id,))
+            self._conn.execute("DELETE FROM assets WHERE asset_id = ?;", (asset_id,))
 
     def add_transactions(
         self,
@@ -733,7 +845,7 @@ class Vault:
         df["category"] = df["category"].fillna(UNCLASSIFIED)
         return df
 
-    def create_category(self, categories: str | Sequence[str]) -> None:
+    def add_category(self, categories: str | Sequence[str]) -> None:
         """Define a category that rules and exceptions can then use.
 
         Rules and exceptions may only use categories defined here, so a
@@ -759,8 +871,8 @@ class Vault:
 
         Examples:
             ```python
-            v.create_category("groceries")
-            v.create_category(["rent", "travel", "dining"])
+            v.add_category("groceries")
+            v.add_category(["rent", "travel", "dining"])
             ```
         """
         adjustments_dir = self._adjustments()
@@ -782,6 +894,86 @@ class Vault:
                 pd.concat([defined, pd.DataFrame({"category": new})], ignore_index=True),
             )
 
+    def delete_category(self, categories: str | Sequence[str], *, confirm: bool = True) -> None:
+        """Delete a category, and every rule and exception that hands it out.
+
+        No transaction is deleted: the ones that had the category become
+        ``"unclassified"``, as if it had never been defined. Your adjustments
+        files are rewritten without it, so a rebuild does not bring it back.
+
+        You are asked to confirm at the terminal first, since the rules that go
+        with it are decisions you made by hand.
+
+        Args:
+            categories: The category to delete, or a list of them
+                (capitalization ignored). Each must already be defined with
+                [`add_category`][goblinvest_core.Vault.add_category].
+            confirm: If ``True`` (default), print what will be deleted and wait
+                for a ``y`` at the terminal; anything else cancels and nothing
+                is deleted. Pass ``False`` in a script, which has nobody to ask.
+
+        Returns:
+            Nothing.
+
+        Raises:
+            FileNotFoundError: The adjustments folder is missing.
+            ValueError: A category is not defined.
+
+        Examples:
+            ```python
+            v.delete_category("streaming")
+            # Delete category "streaming", 3 rules, 1 exception, and unclassify
+            # 84 transactions? [y/N]
+
+            v.delete_category(["streaming", "fun"], confirm=False)
+            ```
+        """
+        adjustments_dir = self._adjustments()
+        names = [categories] if isinstance(categories, str) else list(categories)
+        wanted = pd.Series(names, dtype=str).str.strip()
+
+        defined, _ = _read_category_file(adjustments_dir, _CATEGORIES_FILE, "categories")
+        canonical = _canonical_categories(defined)
+        lowered = wanted.str.lower()
+        unknown = sorted(set(wanted[~lowered.isin(canonical)]))
+        if unknown:
+            raise ValueError(f"These categories are not defined: {', '.join(unknown)}")
+        doomed = set(lowered)
+
+        rules, _ = _read_category_file(adjustments_dir, _RULES_FILE, "category rules")
+        exceptions, _ = _read_category_file(
+            adjustments_dir, _EXCEPTIONS_FILE, "category exceptions"
+        )
+        drop_rules = rules["category"].str.lower().isin(doomed)
+        drop_exceptions = exceptions["category"].str.lower().isin(doomed)
+
+        counts = self.list_categories()
+        n_transactions = int(
+            counts.loc[counts["category_name"].str.lower().isin(doomed), "n_transactions"].sum()
+        )
+        if confirm:
+            spelled = ", ".join(f'"{canonical[name]}"' for name in lowered.drop_duplicates())
+            kind = "category" if len(doomed) == 1 else "categories"
+            if not _confirmed(
+                f"Delete {kind} {spelled}, {_plural(int(drop_rules.sum()), 'rule')}, "
+                f"{_plural(int(drop_exceptions.sum()), 'exception')}, and unclassify "
+                f"{_plural(n_transactions, 'transaction')}?"
+            ):
+                return
+
+        # Only rewrite what actually changes, so a folder under version control
+        # stays quiet, and re-encryption is not paid for nothing.
+        _write_file(
+            adjustments_dir,
+            _CATEGORIES_FILE,
+            defined[~defined["category"].str.lower().isin(doomed)],
+        )
+        if drop_rules.any():
+            _write_file(adjustments_dir, _RULES_FILE, rules[~drop_rules])
+        if drop_exceptions.any():
+            _write_file(adjustments_dir, _EXCEPTIONS_FILE, exceptions[~drop_exceptions])
+        self.apply_categories()
+
     def apply_categories(self) -> pd.DataFrame:
         """Recompute every transaction's category from your adjustments files.
 
@@ -792,7 +984,7 @@ class Vault:
 
         **The categories file** (``categories.csv``, column ``category``) lists
         the categories defined with
-        [`create_category`][goblinvest_core.Vault.create_category]. The other
+        [`add_category`][goblinvest_core.Vault.add_category]. The other
         two files may only use categories from this list.
 
         **The rules file** (``category_rules.csv``, columns
@@ -823,7 +1015,7 @@ class Vault:
             ValueError: A file is malformed — missing columns, an empty
                 pattern or category, the reserved category name
                 ``"unclassified"``, or a category that has not been defined
-                with [`create_category`][goblinvest_core.Vault.create_category].
+                with [`add_category`][goblinvest_core.Vault.add_category].
 
         Examples:
             ```python
@@ -952,7 +1144,7 @@ class Vault:
                 like ``" (2)"`` is stripped for you.
             categories: Category name for each description, or a single one
                 for all of them. Each must already be defined with
-                [`create_category`][goblinvest_core.Vault.create_category]
+                [`add_category`][goblinvest_core.Vault.add_category]
                 (capitalization ignored). Naming the same description twice in
                 one call keeps the last category given.
 
@@ -1048,7 +1240,7 @@ class Vault:
                 back to the rules on the re-apply). A list may mix names and
                 ``None`` to set some and clear others. Each name must already
                 be defined with
-                [`create_category`][goblinvest_core.Vault.create_category].
+                [`add_category`][goblinvest_core.Vault.add_category].
             assets: Asset name for each transaction (capitalization ignored),
                 or one for all. ``None`` (default) means the vault's base
                 currency.

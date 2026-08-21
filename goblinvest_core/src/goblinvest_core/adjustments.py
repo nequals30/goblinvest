@@ -59,9 +59,7 @@ def _read_file(adjustments_dir: str | Path, filename: str, kind: str) -> tuple[p
     """Read one adjustments file (plain or encrypted); return it and its path."""
     filepath = Path(adjustments_dir).expanduser() / filename
     if not filepath.is_file():
-        raise FileNotFoundError(
-            f"No {kind} file at {filepath} (create_adjustments_files starts an empty one)"
-        )
+        raise FileNotFoundError(f"No {kind} file at {filepath}")
     source = io.BytesIO(_decrypt(filepath)) if _is_armored(filepath) else filepath
     # Everything is read as text so numeric-looking patterns and descriptions
     # survive verbatim; amount is converted back to float where it is matched.

@@ -12,5 +12,11 @@
     <a href="/settings/nav">Left pane</a>
     <span class="muted">Reorder and hide items, add your own dashboards.</span>
   </li>
+  {% for kind in kinds %}
+  <li>
+    <a href="{{ kind.url }}">{{ kind.title }}</a>
+    <span class="muted">{{ kind.blurb }}</span>
+  </li>
+  {% endfor %}
 </ul>
 {% endblock %}

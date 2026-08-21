@@ -13,6 +13,7 @@ from goblinvest import auth, db
 from goblinvest import nav as navmod
 from goblinvest.auth import Conn, CurrentUser
 from goblinvest.nav import Nav
+from goblinvest.routes import vault_settings
 from goblinvest.routes.auth import MIN_PASSWORD
 from goblinvest.templates import page
 
@@ -28,7 +29,7 @@ def _redirect(to: str) -> RedirectResponse:
 
 @router.get("")
 def index(request: Request, user: CurrentUser, nav: Nav):
-    return page(request, "settings.html", user, nav)
+    return page(request, "settings.html", user, nav, kinds=list(vault_settings.KINDS.values()))
 
 
 # --- account ----------------------------------------------------------------

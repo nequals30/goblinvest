@@ -34,6 +34,29 @@ def _no_prompt(monkeypatch):
     monkeypatch.setattr(_password, "getpass", fail)
 
 
+def _answers(monkeypatch, *replies):
+    """Make the delete confirmation 'type' these replies, in order. Returns the
+    list the questions land in, so a test can check what was asked."""
+    it = iter(replies)
+    asked = []
+
+    def prompt(question=""):
+        asked.append(question)
+        return next(it)
+
+    monkeypatch.setattr("builtins.input", prompt)
+    return asked
+
+
+def _no_confirmation(monkeypatch):
+    """Make any delete confirmation a test failure."""
+
+    def boom(question=""):
+        raise AssertionError(f"asked for confirmation when it should not have: {question}")
+
+    monkeypatch.setattr("builtins.input", boom)
+
+
 def test_create_builds_julia_compatible_schema(filepath):
     v = Vault.create(filepath)
     v.close()
@@ -141,6 +164,138 @@ class TestAssets:
             df = v.list_assets()
             assert df["asset_name"].tolist() == ["USD", "VTI"]
             assert df["asset_id"].tolist() == [1, 2]  # primary key preserved
+
+
+class TestDeleting:
+    @pytest.fixture
+    def vault(self, filepath):
+        with Vault.create(filepath) as v:
+            v.add_account("checking", account_group_name="cash")
+            v.add_account("brokerage", account_group_name="investments")
+            v.add_asset("VTI")
+            v.add_transactions(
+                "checking", ["2026-07-01", "2026-07-02"], ["rent", "coffee"], [-1200.0, -4.5]
+            )
+            v.add_transactions(
+                "brokerage",
+                ["2026-07-02", "2026-07-02"],
+                ["buy VTI", "buy VTI"],
+                [-1000.0, 3.2],
+                assets=["USD", "VTI"],
+            )
+            with v._conn:
+                v._conn.executemany(
+                    "INSERT INTO prices (asset_id, price_date, price) VALUES (2, ?, ?);",
+                    [("2026-07-02", 312.5), ("2026-07-03", 314.0)],
+                )
+            yield v
+
+    def _descriptions(self, vault):
+        return vault.list_transactions()["description"].tolist()
+
+    def test_delete_account_takes_its_transactions_with_it(self, vault, monkeypatch):
+        _answers(monkeypatch, "y")
+        vault.delete_account("checking")
+
+        assert vault.list_accounts()["account_name"].tolist() == ["brokerage"]
+        assert self._descriptions(vault) == ["buy VTI", "buy VTI"]
+
+    def test_delete_account_question_names_what_goes(self, vault, monkeypatch):
+        asked = _answers(monkeypatch, "y")
+        vault.delete_account("checking")
+
+        assert 'account "checking"' in asked[0]
+        assert "2 transactions" in asked[0]
+
+    def test_declining_deletes_nothing(self, vault, monkeypatch):
+        _answers(monkeypatch, "n")
+        vault.delete_account("checking")
+
+        assert vault.list_accounts()["account_name"].tolist() == ["checking", "brokerage"]
+        assert len(vault.list_transactions()) == 4
+
+    @pytest.mark.parametrize("reply", ["", "no", "yes please", "Ynot", " ", "q"])
+    def test_only_a_plain_yes_deletes(self, vault, monkeypatch, reply):
+        _answers(monkeypatch, reply)
+        vault.delete_account("checking")
+
+        assert len(vault.list_accounts()) == 2
+
+    @pytest.mark.parametrize("reply", ["y", "Y", "yes", " YES "])
+    def test_the_ways_of_saying_yes(self, vault, monkeypatch, reply):
+        _answers(monkeypatch, reply)
+        vault.delete_account("checking")
+
+        assert len(vault.list_accounts()) == 1
+
+    def test_confirm_false_never_asks(self, vault, monkeypatch):
+        _no_confirmation(monkeypatch)
+        vault.delete_account("checking", confirm=False)
+
+        assert vault.list_accounts()["account_name"].tolist() == ["brokerage"]
+
+    def test_confirm_is_keyword_only(self, vault):
+        with pytest.raises(TypeError):
+            vault.delete_account("checking", False)
+
+    def test_account_names_match_case_insensitively(self, vault, monkeypatch):
+        _no_confirmation(monkeypatch)
+        vault.delete_account("CHECKING", confirm=False)
+
+        assert vault.list_accounts()["account_name"].tolist() == ["brokerage"]
+
+    def test_unregistered_account_raises(self, vault, monkeypatch):
+        _no_confirmation(monkeypatch)
+        with pytest.raises(ValueError, match="not registered"):
+            vault.delete_account("savings", confirm=False)
+
+    def test_delete_asset_takes_transactions_and_prices(self, vault, monkeypatch):
+        _answers(monkeypatch, "y")
+        vault.delete_asset("VTI")
+
+        assert vault.list_assets()["asset_name"].tolist() == ["USD"]
+        # the dollar leg of the brokerage purchase is untouched
+        assert self._descriptions(vault) == ["rent", "buy VTI", "coffee"]
+        assert vault._conn.execute("SELECT COUNT(*) FROM prices;").fetchone()[0] == 0
+
+    def test_delete_asset_question_names_what_goes(self, vault, monkeypatch):
+        asked = _answers(monkeypatch, "y")
+        vault.delete_asset("VTI")
+
+        assert 'asset "VTI"' in asked[0]
+        assert "1 transaction," in asked[0]
+        assert "2 stored prices" in asked[0]
+
+    def test_declining_an_asset_deletes_nothing(self, vault, monkeypatch):
+        _answers(monkeypatch, "n")
+        vault.delete_asset("VTI")
+
+        assert vault.list_assets()["asset_name"].tolist() == ["USD", "VTI"]
+        assert len(vault.list_transactions()) == 4
+        assert vault._conn.execute("SELECT COUNT(*) FROM prices;").fetchone()[0] == 2
+
+    def test_base_currency_cannot_be_deleted(self, vault, monkeypatch):
+        _no_confirmation(monkeypatch)
+        with pytest.raises(ValueError, match="base currency"):
+            vault.delete_asset("USD", confirm=False)
+
+        assert len(vault.list_transactions()) == 4
+
+    def test_unregistered_asset_raises(self, vault, monkeypatch):
+        _no_confirmation(monkeypatch)
+        with pytest.raises(ValueError, match="not registered"):
+            vault.delete_asset("NVDA", confirm=False)
+
+    def test_deleting_is_survived_by_a_reload(self, vault, monkeypatch):
+        """The vault is disposable: loading the statements again brings it back."""
+        _no_confirmation(monkeypatch)
+        vault.delete_account("checking", confirm=False)
+
+        vault.add_account("checking", account_group_name="cash")
+        vault.add_transactions(
+            "checking", ["2026-07-01", "2026-07-02"], ["rent", "coffee"], [-1200.0, -4.5]
+        )
+        assert len(vault.list_transactions()) == 4
 
 
 class TestTransactions:
@@ -628,7 +783,7 @@ class TestSummarizeVault:
     @pytest.fixture
     def vault(self, tmp_path):
         with Vault.create(tmp_path / "Vault.db", adjustments_dir=tmp_path / "adjustments") as v:
-            v.create_category(["groceries", "income"])
+            v.add_category(["groceries", "income"])
             v.add_account("checking", account_group_name="cash")
             v.add_account("brokerage", account_group_name="investments")
             v.add_asset("NVDA")

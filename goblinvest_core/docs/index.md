@@ -70,6 +70,19 @@ v.list_transactions()
 # 1               2    brokerage 2026-07-02     buy VTI     3.20   VTI              1.0        investments
 ```
 
+Deleting an account or an asset deletes its transactions too, so both ask you to
+confirm at the terminal first and do nothing unless you answer `y`:
+
+```python
+v.delete_account("old-checking")
+# Delete account "old-checking" and its 412 transactions? [y/N]
+
+v.delete_asset("VTI", confirm=False)   # in a script, which has nobody to ask
+```
+
+Deleting an asset also deletes its stored prices. The base currency cannot be
+deleted. Whatever you remove comes back by loading the statements again.
+
 `summarize_vault` counts what the vault holds and shows the dates its ledger
 spans:
 
@@ -169,7 +182,7 @@ v = Vault.create("~/finance/MyVault.db", adjustments_dir="~/statements/adjustmen
 Define your categories, then apply them:
 
 ```python
-v.create_category(["groceries", "rent", "travel", "streaming"])
+v.add_category(["groceries", "rent", "travel", "streaming"])
 
 orphans = v.apply_categories()
 v.list_transactions()      # now has a `category` column
@@ -203,6 +216,15 @@ v.set_category_exception("checking", "2026-02-14", "CHECK # 1145", -500.00, "gif
 by description, sorted so the row covering the most transactions comes first.
 `list_categories()` lists every category with its transaction count.
 
+`delete_category` removes a category along with every rule and exception that
+hands it out, leaving those transactions unclassified. No transaction is
+deleted. Like the other deletions it asks you to confirm first:
+
+```python
+v.delete_category("streaming")
+# Delete category "streaming", 3 rules, 1 exception, and unclassify 84 transactions? [y/N]
+```
+
 ??? note "Technical details"
 
     Descriptions match exactly, ignoring capitalization. Transactions that are
@@ -233,7 +255,7 @@ from goblinvest_core import Vault, ask_password
 ask_password()
 
 v = Vault.create("~/finance/MyVault.db", encrypted=True)
-v.create_category(["streaming", "gifts"])
+v.add_category(["streaming", "gifts"])
 v.set_category_rule("Netflix", "streaming")
 v.close()
 

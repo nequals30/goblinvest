@@ -131,6 +131,13 @@ table.grid button {
 table.grid button:hover:enabled { background: var(--bg); }
 table.grid button:disabled { opacity: 0.35; cursor: default; }
 table.grid button.danger { color: var(--error); }
+table.grid a.danger { color: var(--error); font-size: 12px; text-decoration: none; }
+table.grid a.danger:hover { text-decoration: underline; }
+/* A plain table cell, deliberately not .c-act: that one is display:flex, which
+   takes it out of table layout, so its border-bottom and its text stop lining up
+   with the rest of the row. One link needs no flex. Padding keeps "delete" off
+   the data it would delete. */
+table.grid .c-delete { width: 1%; padding-left: 18px; padding-right: 10px; }
 
 /* visually hidden, still read by screen readers */
 .sr-only {
@@ -249,6 +256,31 @@ form.row button, .pane button[type="submit"] {
   cursor: pointer;
 }
 form.row button:hover, .pane button[type="submit"]:hover { filter: brightness(1.15); }
+
+/* delete confirmation — the one page that should stop you */
+.danger-zone {
+  border: 2px solid var(--error);
+  background: #fff5f6;
+  padding: 12px 14px;
+  margin: 10px 0;
+  max-width: 640px;
+}
+.danger-zone h2 { color: var(--error); font-size: 1.05rem; margin: 0 0 6px; }
+.danger-zone .danger-note { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+.danger-zone ul { margin: 0 0 12px; padding-left: 18px; font-size: 13px; }
+.danger-zone li { margin-bottom: 3px; }
+.danger-zone .actions { display: flex; gap: 14px; align-items: center; }
+.danger-zone .actions a { color: var(--muted); font-size: 13px; }
+button.confirm-delete {
+  border: 1px solid var(--error);
+  background: var(--error);
+  color: #fff;
+  padding: 7px 14px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+button.confirm-delete:hover { filter: brightness(1.15); }
 
 .notice {
   border: 1px solid var(--ok);
