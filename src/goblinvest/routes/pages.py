@@ -3,7 +3,10 @@
 No finance logic here — these are thin renderers over what core returns.
 """
 
-from fastapi import APIRouter, HTTPException, Request, status
+from typing import Annotated
+
+from fastapi import APIRouter, Form, HTTPException, Request, status
+from fastapi.responses import RedirectResponse
 
 from goblinvest import months, vaults
 from goblinvest.auth import Conn, CurrentUser
@@ -25,6 +28,10 @@ PLACEHOLDERS = {
 }
 
 
+def _redirect(to: str) -> RedirectResponse:
+    return RedirectResponse(to, status_code=status.HTTP_303_SEE_OTHER)
+
+
 def _placeholder(request: Request, user, nav, heading: str, blurb: str):
     return page(request, "placeholder.html", user, nav, heading=heading, blurb=blurb)
 
@@ -44,6 +51,7 @@ def _rows(frame) -> list[dict]:
     pandas types. No arithmetic here — the numbers pass through untouched."""
     return [
         {
+            "id": int(row.transaction_id),
             "date": row.date.date(),
             "account": row.account_name,
             "description": row.description,
@@ -71,15 +79,26 @@ def _selected_month(available: list[months.Month], y: int | None, mo: int | None
     return months.clamp(chosen.shifted(step), first, last)
 
 
-@router.get("/month")
-def month_view(
+def _month_page(
     request: Request,
-    user: CurrentUser,
-    nav: Nav,
+    user,
+    nav,
     y: int | None = None,
     mo: int | None = None,
     step: int = 0,
+    *,
+    edit: int | None = None,
+    error: str = "",
+    status_code: int = 200,
 ):
+    """Month View, rendered from scratch. The GET calls this; so does any POST
+    that has something to say instead of redirecting.
+
+    `edit` is the transaction whose category cell is open for editing. Rows that
+    are still unclassified always render the editor; a classified row renders
+    its category as text until its pencil is clicked, which is a plain GET back
+    to this page. That keeps one `<select>` on the page instead of one per row.
+    """
     try:
         with vaults.open_vault(user.id) as vault:
             summary = vaults.summary(vault)
@@ -94,6 +113,8 @@ def month_view(
                 if selected is not None
                 else []
             )
+            # Every defined category, for the dropdown in each row.
+            categories = [str(name) for name in vault.list_categories()["category_name"]]
     except vaults.VaultMissing:
         return page(request, "month.html", user, nav, no_vault=True, years=[], rows=[])
 
@@ -108,7 +129,77 @@ def month_view(
         has_older=selected is not None and selected > available[0],
         has_newer=selected is not None and selected < available[-1],
         rows=rows,
+        categories=categories,
+        edit=edit,
+        error=error,
+        status_code=status_code,
     )
+
+
+@router.get("/month")
+def month_view(
+    request: Request,
+    user: CurrentUser,
+    nav: Nav,
+    y: int | None = None,
+    mo: int | None = None,
+    step: int = 0,
+    edit: int | None = None,
+):
+    return _month_page(request, user, nav, y, mo, step, edit=edit)
+
+
+# --- categorizing from the month table ---------------------------------------
+#
+# Two buttons per row, two core calls. "all like this" is a rule keyed on the
+# description; "just this one" is an exception keyed on the whole transaction.
+# Which one runs is which button was pressed — nothing here decides it, and
+# nothing here knows what a category means.
+
+
+@router.post("/month/categorize")
+def categorize(
+    request: Request,
+    user: CurrentUser,
+    nav: Nav,
+    y: Annotated[int, Form()],
+    mo: Annotated[int, Form()],
+    scope: Annotated[str, Form()],
+    account: Annotated[str, Form()],
+    date: Annotated[str, Form()],
+    description: Annotated[str, Form()],
+    amount: Annotated[float, Form()],
+    asset: Annotated[str, Form()],
+    # Defaulted, not required: an empty <select> submits as a *missing* field,
+    # and a 422 is the wrong answer to "you didn't pick one".
+    category: Annotated[str, Form()] = "",
+    tid: Annotated[int, Form()] = 0,
+):
+    # The row's id only steers the page: it lands the browser back on the row
+    # (#t<id>), and on an error it keeps that row's editor open.
+    back = f"/month?y={y}&mo={mo}" + (f"#t{tid}" if tid else "")
+    if not category.strip():
+        return _month_page(
+            request, user, nav, y, mo, edit=tid, error="Pick a category first.", status_code=400
+        )
+    try:
+        with vaults.open_vault(user.id) as vault:
+            if scope == "all":
+                vault.set_category_rule(description, category)
+            else:
+                # The natural key of one transaction, straight back out of the
+                # row it was rendered from. The asset goes with it: core reads
+                # `assets=None` as the base currency, not "any".
+                vault.set_category_exception(
+                    account, date, description, amount, category, assets=asset
+                )
+    except vaults.VaultMissing:
+        return _redirect(back)
+    except vaults.CORE_ERRORS as exc:
+        return _month_page(
+            request, user, nav, y, mo, edit=tid, error=vaults.explain(exc), status_code=400
+        )
+    return _redirect(back)
 
 
 @router.get("/dashboard")

@@ -29,6 +29,20 @@ class VaultMissing(Exception):
     """No vault file for this user yet."""
 
 
+# What core raises when it doesn't like an argument: an unregistered name, the
+# base currency, an undefined or reserved category, a transaction that matches
+# nothing, a missing adjustments folder. Routes show these rather than 500.
+CORE_ERRORS = (ValueError, FileNotFoundError)
+
+
+def explain(exc: Exception) -> str:
+    """A core exception as a line to put in front of the user. Core's own
+    ValueError messages already name what was wrong, so they pass through."""
+    if isinstance(exc, FileNotFoundError):
+        return "This vault's adjustments folder is missing, so category changes can't be saved."
+    return str(exc)
+
+
 def vault_exists(user_id: int) -> bool:
     return storage.vault_path(user_id).is_file()
 
@@ -61,6 +75,18 @@ def open_vault(user_id: int) -> Iterator[Any]:
         yield vault
     finally:
         vault.close()
+
+
+def define_category(vault: Any, name: str) -> None:
+    """Define a category and make it visible to the pages that list them.
+
+    `add_category` writes the adjustments file; the vault's own `categories`
+    table — what `list_categories()` reads — is written by `apply_categories`.
+    Without the second call a new category isn't on the page it was just added
+    from. `delete_category` re-applies on its own, so it needs no counterpart.
+    """
+    vault.add_category(name)
+    vault.apply_categories()
 
 
 def _as_date(value: Any) -> date | None:

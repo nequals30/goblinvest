@@ -108,15 +108,20 @@ def test_step_buttons_move_one_month(with_transactions):
     assert shown_month(html) == ("5", "2026")
 
 
+def picker(html):
+    """Just the month picker — the table has disabled controls of its own."""
+    return html.split('<form class="picker"', 1)[1].split("</form>", 1)[0]
+
+
 def test_step_buttons_are_disabled_at_the_ends(with_transactions):
-    newest = with_transactions.get("/month?y=2026&mo=5").text
+    newest = picker(with_transactions.get("/month?y=2026&mo=5").text)
     assert newest.count("disabled") == 1  # only "next" is off
     assert re.search(r'value="1" class="step"[^>]*disabled', newest)
 
-    oldest = with_transactions.get("/month?y=2026&mo=3").text
+    oldest = picker(with_transactions.get("/month?y=2026&mo=3").text)
     assert re.search(r'value="-1" class="step"[^>]*disabled', oldest)
 
-    middle = with_transactions.get("/month?y=2026&mo=4").text
+    middle = picker(with_transactions.get("/month?y=2026&mo=4").text)
     assert "disabled" not in middle
 
 

@@ -189,19 +189,32 @@ def _category_rows(vault: Any) -> list[dict]:
 ROWS = {"accounts": _account_rows, "assets": _asset_rows, "categories": _category_rows}
 
 
+def _find(rows: list[dict], name: str) -> dict | None:
+    """The row a submitted name refers to, matched case-insensitively the way
+    core matches names."""
+    wanted = name.strip().lower()
+    return next((row for row in rows if row["name"].lower() == wanted), None)
+
+
 def _add(vault: Any, slug: str, name: str, group: str, share: float) -> None:
     if slug == "accounts":
+        # core's `add_account` is an upsert, not a no-op: a name that already
+        # exists gets its share and group rewritten, so re-adding "checking"
+        # with this form's default share of 1 would quietly un-joint a 0.5
+        # account. Refuse it instead. Case-insensitively, for two reasons: core
+        # matches names that way everywhere else, and `accounts.account_name` is
+        # UNIQUE without COLLATE NOCASE — so "Checking" alongside "checking"
+        # would be two rows that core's own name lookup can't tell apart.
+        clash = _find(_account_rows(vault), name)
+        if clash is not None:
+            raise ValueError(f'An account named "{clash["name"]}" already exists.')
         extra = {"account_group_name": group} if group else {}
         vault.add_account(name, ownership_share=share, **extra)
     elif slug == "assets":
+        # No guard needed: adding an asset or a category twice changes nothing.
         vault.add_asset(name)
     else:
-        vault.add_category(name)
-        # add_category defines it in the adjustments file; the vault's own
-        # categories table is written by apply_categories, which is what
-        # list_categories reads. Without this the new category isn't on the page
-        # it just came from. delete_category re-applies on its own.
-        vault.apply_categories()
+        vaults.define_category(vault, name)
 
 
 def _delete(vault: Any, slug: str, name: str) -> None:
@@ -214,16 +227,6 @@ def _delete(vault: Any, slug: str, name: str) -> None:
 
 
 # --- shared rendering --------------------------------------------------------
-
-# What core raises when it doesn't like an argument: an unregistered name, the
-# base currency, an undefined or reserved category, a missing adjustments folder.
-CORE_ERRORS = (ValueError, FileNotFoundError)
-
-
-def _problem(exc: Exception) -> str:
-    if isinstance(exc, FileNotFoundError):
-        return "The adjustments folder for this vault is missing, so categories can't change."
-    return str(exc)
 
 
 def _list_page(
@@ -252,13 +255,6 @@ def _list_page(
         deleted=deleted,
         status_code=status_code,
     )
-
-
-def _find(rows: list[dict], name: str) -> dict | None:
-    """The row a submitted name refers to, matched case-insensitively the way
-    core matches names."""
-    wanted = name.strip().lower()
-    return next((row for row in rows if row["name"].lower() == wanted), None)
 
 
 # --- routes ------------------------------------------------------------------
@@ -308,9 +304,14 @@ def add_item(
             _add(vault, slug, name, group.strip(), share_value)
     except vaults.VaultMissing:
         return _redirect(kind.url)
-    except CORE_ERRORS as exc:
+    except vaults.CORE_ERRORS as exc:
         return _list_page(
-            request, user, nav, kind, error=_problem(exc), status_code=status.HTTP_400_BAD_REQUEST
+            request,
+            user,
+            nav,
+            kind,
+            error=vaults.explain(exc),
+            status_code=status.HTTP_400_BAD_REQUEST,
         )
     return _redirect(kind.url)
 
@@ -346,8 +347,13 @@ def delete_item(
             _delete(vault, slug, name)
     except vaults.VaultMissing:
         return _redirect(kind.url)
-    except CORE_ERRORS as exc:
+    except vaults.CORE_ERRORS as exc:
         return _list_page(
-            request, user, nav, kind, error=_problem(exc), status_code=status.HTTP_400_BAD_REQUEST
+            request,
+            user,
+            nav,
+            kind,
+            error=vaults.explain(exc),
+            status_code=status.HTTP_400_BAD_REQUEST,
         )
     return _redirect(f"{kind.url}?deleted={quote(name.strip())}")

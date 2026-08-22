@@ -226,6 +226,36 @@ table.grid th[aria-sort] .sort-btn::after { content: " ⇅"; opacity: 0.3; }
 table.grid th[aria-sort="ascending"] .sort-btn::after { content: " ↑"; opacity: 1; }
 table.grid th[aria-sort="descending"] .sort-btn::after { content: " ↓"; opacity: 1; }
 
+/* categorizing, in the Month View table
+   The flex goes on the <form>, never on the <td>: a flex table cell drops out
+   of table layout and its border and baseline stop matching the row. */
+table.grid td.cat { padding: 1px 6px; }
+.cat-form { display: flex; gap: 3px; align-items: center; }
+.cat-form select {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--fg);
+  font-size: 12px;
+  padding: 1px 2px;
+  max-width: 15ch;
+}
+/* Nothing chosen yet — visible at a glance down the column, without shouting. */
+.cat-form select.unset { color: var(--muted); font-style: italic; }
+
+/* A settled category: its name, and a pencil that opens the editor for it. */
+table.grid td.cat a.edit {
+  color: var(--muted);
+  text-decoration: none;
+  margin-left: 6px;
+  font-size: 12px;
+}
+table.grid td.cat a.edit:hover { color: var(--accent); }
+table.grid td.cat a.edit:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Beats `table.grid button` on specificity, which is the point. */
+table.grid .cat-form button { padding: 1px 5px; font-size: 11px; }
+
+.cat-foot { margin-top: 10px; max-width: 70ch; }
+
 .pager {
   display: flex;
   align-items: center;

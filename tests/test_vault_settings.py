@@ -107,6 +107,39 @@ def test_add_account_keeps_the_ownership_share(stocked):
     assert float(share) == 0.25
 
 
+@pytest.mark.parametrize("name", ["checking", "CHECKING"])
+def test_adding_an_account_that_exists_is_refused(stocked, name):
+    """core's add_account is an upsert — without this guard, re-adding a name
+    would rewrite its share and group instead of saying it's already there."""
+    r = stocked.post(f"{ACCOUNTS}/add", data={"name": name, "group": "spending"})
+    assert r.status_code == 400 and "already exists" in r.text
+    with vaults.open_vault(1) as v:
+        accounts = v.list_accounts()
+        assert list(accounts["account_name"]).count("checking") == 1
+        row = accounts[accounts["account_name"] == "checking"].iloc[0]
+    assert row["account_group_name"] == "cash"  # untouched
+
+
+def test_a_joint_account_keeps_its_share_when_re_added(stocked):
+    r = stocked.post(f"{ACCOUNTS}/add", data={"name": "joint-checking", "share": "1"})
+    assert r.status_code == 400
+    with vaults.open_vault(1) as v:
+        accounts = v.list_accounts()
+        share = accounts.loc[accounts["account_name"] == "joint-checking", "ownership_share"].iloc[
+            0
+        ]
+    assert float(share) == 0.5
+
+
+def test_re_adding_an_asset_or_category_is_harmless(stocked):
+    """Both are no-ops in core, so they need no guard of their own."""
+    assert stocked.post(f"{ASSETS}/add", data={"name": "VFIAX"}).status_code == 200
+    assert stocked.post(f"{CATEGORIES}/add", data={"name": "groceries"}).status_code == 200
+    with vaults.open_vault(1) as v:
+        assert names(v, "assets").count("VFIAX") == 1
+        assert names(v, "categories").count("groceries") == 1
+
+
 def test_add_account_with_a_nonsense_share_is_rejected(stocked):
     r = stocked.post(f"{ACCOUNTS}/add", data={"name": "ours", "share": "half"})
     assert r.status_code == 400 and "must be a number" in r.text

@@ -58,23 +58,6 @@
     <button type="submit">add category</button>
     {% endif %}
   </form>
-
-  {% if kind.slug == "accounts" %}
-  <p class="hint">
-    An existing name isn't duplicated — its group and share are updated instead.
-    Share is your fraction of a joint account: 1 for your own, 0.5 for a half.
-  </p>
-  {% elif kind.slug == "assets" %}
-  <p class="hint">
-    Tickers, other currencies, anything a transaction can be denominated in.
-    Adding one twice does nothing.
-  </p>
-  {% else %}
-  <p class="hint">
-    Categories have to be defined before a rule can hand one out, so a misspelling
-    is an error rather than a new category. Capitalization doesn't make a second one.
-  </p>
-  {% endif %}
 </section>
 {% endif %}
 {% endblock %}
