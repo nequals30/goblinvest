@@ -9,3 +9,16 @@ __pycache__/
 # App-managed runtime state: users db + per-user vaults, adjustments, raw data
 data/
 *.db
+
+# Local deployment settings
+.env
+.ship.env
+
+# Dogfooding this on a personal home server. The Dockerfile and compose.yaml
+# are the project's; these are one person's habits, and would only confuse
+# someone trying to run goblinvest themselves.
+scripts/ship.sh
+deploy/
+
+# Notes for Claude, not for the repo.
+CLAUDE.md

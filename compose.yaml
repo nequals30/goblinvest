@@ -1,0 +1,39 @@
+# Goblinvest.
+#
+#     cp .env.example .env      # set GV_UID/GV_GID to your own, at least
+#     mkdir -p data             # or Docker creates it owned by root
+#     docker compose up -d --build
+#
+# Then open http://127.0.0.1:8080 and sign up.
+
+services:
+  goblinvest:
+    build: .
+    image: goblinvest:latest
+    container_name: goblinvest
+    restart: unless-stopped
+
+    environment:
+      # 'prod' marks the session cookie Secure, which is correct when something
+      # in front of this serves HTTPS -- and silently breaks login on plain
+      # http, because the browser then refuses to send the cookie back.
+      GV_ENV: ${GV_ENV:-dev}
+      # The month picker asks the container what month it is; containers are
+      # UTC unless told otherwise.
+      TZ: ${TZ:-UTC}
+
+    # Your own uid/gid, so the folder below stays writable by the container and
+    # stays yours on the host. `id -u` / `id -g`.
+    user: "${GV_UID:-1000}:${GV_GID:-1000}"
+
+    volumes:
+      # A real folder, on purpose: statement CSVs have to be dropped into
+      # data/users/<id>/raw_data/ by hand until the import page is built, and
+      # backups should be a plain folder copy.
+      - ./data:/data
+
+    # Bound to localhost by default -- put a reverse proxy in front rather than
+    # publishing this to the network. There is no CSRF protection and no rate
+    # limiting on login yet.
+    ports:
+      - "${GV_BIND:-127.0.0.1}:${GV_PORT:-8080}:8080"

@@ -1,0 +1,30 @@
+# The build context is NOT gitignore-aware, and this file is the only thing
+# stopping real financial data from being baked into an image that then gets
+# shipped elsewhere. data/ first, for that reason.
+data/
+*.db
+.env
+
+# 260MB, and rebuilt inside the image anyway.
+.venv/
+goblinvest_core/.venv/
+
+.git/
+.gitignore
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Not needed at runtime.
+tests/
+goblinvest_core/tests/
+goblinvest_core/docs/
+goblinvest_core/site/
+goblinvest_core/mkdocs.yml
+CLAUDE.md
+Dockerfile
+compose.yaml
+deploy/
+.ship.env
