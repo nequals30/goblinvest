@@ -82,6 +82,7 @@
              ><span class="sr-only">change category</span>✎</a>
           {% else %}
           <form method="post" action="/month/categorize" class="cat-form">
+            {{ csrf_input }}
             <input type="hidden" name="y" value="{{ selected.year }}" />
             <input type="hidden" name="mo" value="{{ selected.month }}" />
             <input type="hidden" name="tid" value="{{ row.id }}" />

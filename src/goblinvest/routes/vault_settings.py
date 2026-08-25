@@ -237,6 +237,7 @@ def _list_page(
     *,
     error: str = "",
     deleted: str = "",
+    notice: str = "",
     status_code: int = 200,
 ):
     try:
@@ -253,6 +254,7 @@ def _list_page(
         rows=rows,
         error=error,
         deleted=deleted,
+        notice=notice,
         status_code=status_code,
     )
 
@@ -261,8 +263,47 @@ def _list_page(
 
 
 @router.get("/{slug}")
-def index(request: Request, user: CurrentUser, nav: Nav, slug: Slug, deleted: str = ""):
-    return _list_page(request, user, nav, KINDS[slug], deleted=deleted)
+def index(
+    request: Request,
+    user: CurrentUser,
+    nav: Nav,
+    slug: Slug,
+    deleted: str = "",
+    applied: int | None = None,
+):
+    notice = "" if applied is None else _applied_notice(applied)
+    return _list_page(request, user, nav, KINDS[slug], deleted=deleted, notice=notice)
+
+
+def _applied_notice(unmatched: int) -> str:
+    if unmatched:
+        return f"Categories applied. {_plural(unmatched, 'exception row')} matched no transaction."
+    return "Categories applied."
+
+
+@router.post("/categories/apply")
+def apply_categories(request: Request, user: CurrentUser, nav: Nav):
+    """Re-run core's `apply_categories()` over the whole vault.
+
+    The rules and exceptions files are the user's own and can be edited outside
+    this app; this is the button that makes the vault match them again.
+    """
+    kind = KINDS["categories"]
+    try:
+        with vaults.open_vault(user.id) as vault:
+            unmatched = vaults.apply_categories(vault)
+    except vaults.VaultMissing:
+        return _redirect(kind.url)
+    except vaults.CORE_ERRORS as exc:
+        return _list_page(
+            request,
+            user,
+            nav,
+            kind,
+            error=vaults.explain(exc),
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    return _redirect(f"{kind.url}?applied={unmatched}")
 
 
 @router.post("/{slug}/add")

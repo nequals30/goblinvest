@@ -7,6 +7,7 @@
 
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
 {% if deleted %}<div class="notice">Deleted {{ kind.noun }} “{{ deleted }}”.</div>{% endif %}
+{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
 
 {% if no_vault %}
 <p class="muted">No vault yet. It's created when you sign up — this account predates that.</p>
@@ -44,6 +45,7 @@
 <section class="pane">
   <h2>Add {{ kind.noun }}</h2>
   <form method="post" action="{{ kind.url }}/add" class="row">
+    {{ csrf_input }}
     {% if kind.slug == "accounts" %}
     <label>name <input type="text" name="name" required placeholder="checking" /></label>
     <label>group <input type="text" name="group" placeholder="cash" /></label>
@@ -59,5 +61,15 @@
     {% endif %}
   </form>
 </section>
+
+{% if kind.slug == "categories" %}
+<section class="pane">
+  <h2>Adjustments files</h2>
+  <form method="post" action="{{ kind.url }}/apply" class="row">
+    {{ csrf_input }}
+    <button type="submit">apply categories</button>
+  </form>
+</section>
+{% endif %}
 {% endif %}
 {% endblock %}

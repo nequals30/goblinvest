@@ -77,6 +77,16 @@ def open_vault(user_id: int) -> Iterator[Any]:
         vault.close()
 
 
+def apply_categories(vault: Any) -> int:
+    """Recompute every transaction's category from the adjustments files.
+
+    Returns how many exception rows matched no transaction. Core hands those
+    back as a DataFrame; counting them here is what keeps pandas types from
+    leaving this module.
+    """
+    return len(vault.apply_categories())
+
+
 def define_category(vault: Any, name: str) -> None:
     """Define a category and make it visible to the pages that list them.
 
@@ -86,7 +96,7 @@ def define_category(vault: Any, name: str) -> None:
     from. `delete_category` re-applies on its own, so it needs no counterpart.
     """
     vault.add_category(name)
-    vault.apply_categories()
+    apply_categories(vault)
 
 
 def _as_date(value: Any) -> date | None:

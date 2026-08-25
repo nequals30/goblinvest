@@ -257,3 +257,69 @@ def test_names_match_the_way_core_matches_them(stocked):
 def test_delete_answers_303_so_a_refresh_does_not_repost(stocked):
     r = stocked.post(f"{ACCOUNTS}/delete", data={"name": "checking"}, follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"].startswith(ACCOUNTS)
+
+
+# --- reapplying the adjustments files -----------------------------------------
+
+
+def categories_of(vault):
+    frame = vault.list_transactions()
+    return dict(zip(frame["description"], frame["category"]))
+
+
+def test_only_the_categories_page_offers_apply(stocked):
+    assert f'action="{CATEGORIES}/apply"' in stocked.get(CATEGORIES).text
+    for url in (ACCOUNTS, ASSETS):
+        assert "/apply" not in stocked.get(url).text
+
+
+def test_apply_picks_up_a_hand_edited_rules_file(stocked):
+    """The rules and exceptions files are the user's own and get edited outside
+    this app; the button is what makes the vault match them again."""
+    from goblinvest import storage
+
+    with vaults.open_vault(1) as v:
+        v.add_category("housing")  # file only — no apply_categories behind it
+    rules = storage.adjustments_dir(1) / "category_rules.csv"
+    rules.write_text(rules.read_text() + "Rent,housing\n")
+    with vaults.open_vault(1) as v:
+        assert categories_of(v)["Rent"] == "unclassified"
+
+    r = stocked.post(f"{CATEGORIES}/apply")
+    assert r.status_code == 200 and r.url.path == CATEGORIES
+    assert "Categories applied." in r.text
+    with vaults.open_vault(1) as v:
+        assert categories_of(v)["Rent"] == "housing"
+
+
+def test_apply_answers_303_so_a_refresh_does_not_repost(stocked):
+    r = stocked.post(f"{CATEGORIES}/apply", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == f"{CATEGORIES}?applied=0"
+
+
+def test_apply_reports_exception_rows_that_matched_nothing(stocked):
+    """An exception outlives the transaction it names — core hands those rows
+    back rather than failing silently, so the page says how many."""
+    with vaults.open_vault(1) as v:
+        v.set_category_exception("checking", "2026-05-20", "Rent", -2000.00, "groceries")
+        v.delete_account("checking", confirm=False)
+
+    r = stocked.post(f"{CATEGORIES}/apply")
+    assert "1 exception row matched no transaction." in r.text
+
+
+def test_apply_shows_core_complaints_rather_than_raising(stocked):
+    from goblinvest import storage
+
+    rules = storage.adjustments_dir(1) / "category_rules.csv"
+    rules.write_text(rules.read_text() + "Rent,not-a-category\n")
+    r = stocked.post(f"{CATEGORIES}/apply")
+    assert r.status_code == 400 and "not-a-category" in r.text
+
+
+def test_apply_with_no_vault_goes_back_to_the_list(signed_up):
+    from goblinvest import storage
+
+    storage.vault_path(1).unlink()
+    r = signed_up.post(f"{CATEGORIES}/apply", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == CATEGORIES

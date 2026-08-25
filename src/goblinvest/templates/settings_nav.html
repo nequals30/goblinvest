@@ -25,10 +25,12 @@
       <tr class="{% if item.hidden %}is-hidden{% endif %}">
         <td class="c-move">
           <form method="post" action="/settings/nav/{{ item.id }}/move">
+            {{ csrf_input }}
             <input type="hidden" name="direction" value="up" />
             <button type="submit" title="move up" {% if loop.first %}disabled{% endif %}>↑</button>
           </form>
           <form method="post" action="/settings/nav/{{ item.id }}/move">
+            {{ csrf_input }}
             <input type="hidden" name="direction" value="down" />
             <button type="submit" title="move down" {% if loop.last %}disabled{% endif %}>↓</button>
           </form>
@@ -38,6 +40,7 @@
         <td class="muted">{{ item.kind }}</td>
         <td class="c-act">
           <form method="post" action="/settings/nav/{{ item.id }}/visibility">
+            {{ csrf_input }}
             <input type="hidden" name="hidden" value="{{ 0 if item.hidden else 1 }}" />
             <button type="submit">{{ "show" if item.hidden else "hide" }}</button>
           </form>
@@ -45,6 +48,7 @@
         <td class="c-act">
           {% if item.deletable %}
           <form method="post" action="/settings/nav/{{ item.id }}/delete">
+            {{ csrf_input }}
             <button type="submit" class="danger">delete</button>
           </form>
           {% endif %}
@@ -59,6 +63,7 @@
 <section class="pane">
   <h2>New dashboard</h2>
   <form method="post" action="/settings/nav/dashboards" class="row">
+    {{ csrf_input }}
     <label>
       name
       <input type="text" name="label" maxlength="{{ max_label }}" required

@@ -13,6 +13,7 @@
   {% if changed %}<div class="notice">Password changed. Other sessions were signed out.</div>{% endif %}
 
   <form method="post" action="/settings/account/password" class="narrow">
+    {{ csrf_input }}
     <label>
       current password
       <input type="password" name="current_password" required autocomplete="current-password" />
