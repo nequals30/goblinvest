@@ -1,7 +1,8 @@
-/* All of Goblinvest's JavaScript. Two small things, no dependencies:
+/* All of Goblinvest's JavaScript. Three small things, no dependencies:
  *
  *   1. sortable, optionally paginated tables
  *   2. selects that submit their form on change
+ *   3. multi-selects shown as checkbox dropdowns
  *
  * Everything here is progressive enhancement: with JS off or broken, pages
  * still render and every control still works (the pickers just need their
@@ -22,9 +23,44 @@
  *                                         to the cell's text
  *
  * data-page-size is optional; the pager hides itself when everything fits.
+ *
+ * **Opening a page sorts it the way the server sent it** — for Month View, by
+ * date. The chosen sort is carried across exactly one page load, and only when
+ * the load came from a control *inside* the table: a row's form (categorizing)
+ * or a link in a cell (the ✎ pencil). Those are one gesture that happens to be
+ * a round trip, and losing the sort mid-way made working down a sorted column
+ * impossible. Anything else — the nav, the month picker, the filter bar, typing
+ * the URL — is arriving at the page, and arrives sorted by date (user's call,
+ * 2026-08-27).
+ *
+ * So the state is *written* when such a control navigates, and read-and-deleted
+ * on the next render. Keyed per table: data-sort-key if it has one (Month View
+ * sets `month`, so the 400-error re-render at /month/categorize is still the
+ * same table), otherwise the path plus the table's position on it.
  */
 (function () {
   "use strict";
+
+  var STORE = "gv:sort:";
+
+  function take(key) {
+    try {
+      var raw = sessionStorage.getItem(STORE + key);
+      sessionStorage.removeItem(STORE + key); // one load only
+      return JSON.parse(raw);
+    } catch (e) {
+      return null; // private mode, storage off, or something else's key
+    }
+  }
+
+  function hold(key, state) {
+    try {
+      if (state) sessionStorage.setItem(STORE + key, JSON.stringify(state));
+      else sessionStorage.removeItem(STORE + key);
+    } catch (e) {
+      /* not being able to remember is not a reason to stop sorting */
+    }
+  }
 
   function cellValue(row, index, type) {
     var cell = row.cells[index];
@@ -37,9 +73,10 @@
     return type === "date" ? raw : raw.toLowerCase();
   }
 
-  function setup(table) {
+  function setup(table, position) {
     var body = table.tBodies[0];
     if (!body) return;
+    var key = table.dataset.sortKey || location.pathname + ":" + position;
     var rows = Array.prototype.slice.call(body.rows);
     // Remembered so an unsorted state and equal keys both stay stable.
     rows.forEach(function (row, i) {
@@ -87,6 +124,28 @@
     }
 
     var headers = table.tHead ? table.tHead.rows[0].cells : [];
+
+    function sortBy(index, ascending) {
+      var th = headers[index];
+      if (!th || !th.dataset.type) return false;
+      Array.prototype.forEach.call(headers, function (other) {
+        if (other.dataset.type) other.setAttribute("aria-sort", "none");
+      });
+      th.setAttribute("aria-sort", ascending ? "ascending" : "descending");
+
+      var direction = ascending ? 1 : -1;
+      rows.sort(function (a, b) {
+        var x = cellValue(a, index, th.dataset.type);
+        var y = cellValue(b, index, th.dataset.type);
+        if (x < y) return -direction;
+        if (x > y) return direction;
+        return a._i - b._i;
+      });
+      page = 0;
+      draw();
+      return true;
+    }
+
     Array.prototype.forEach.call(headers, function (th, index) {
       var type = th.dataset.type;
       if (!type) return;
@@ -106,25 +165,32 @@
 
       button.addEventListener("click", function () {
         var ascending = th.getAttribute("aria-sort") !== "ascending";
-        Array.prototype.forEach.call(headers, function (other) {
-          other.setAttribute("aria-sort", "none");
-        });
-        th.setAttribute("aria-sort", ascending ? "ascending" : "descending");
-
-        var direction = ascending ? 1 : -1;
-        rows.sort(function (a, b) {
-          var x = cellValue(a, index, type);
-          var y = cellValue(b, index, type);
-          if (x < y) return -direction;
-          if (x > y) return direction;
-          return a._i - b._i;
-        });
-        page = 0;
-        draw();
+        sortBy(index, ascending);
+        sorted = { index: index, ascending: ascending };
       });
     });
 
-    if (pager) draw();
+    // What the table is sorted by right now, or null for the server's order.
+    // Nothing is stored until something inside the table navigates.
+    var sorted = take(key);
+    // A carried-over column can be gone — a table's shape is the server's to
+    // change — so fall back to the order it was rendered in.
+    if (!sorted || !sortBy(sorted.index, sorted.ascending !== false)) {
+      sorted = null;
+      if (pager) draw();
+    }
+
+    // Submitting a row's form or following a link in a cell is one gesture
+    // that happens to reload the page — the sort goes with it. Both events
+    // bubble from inside the table, so this is the only place that knows.
+    function keep() {
+      hold(key, sorted);
+    }
+
+    table.addEventListener("submit", keep);
+    table.addEventListener("click", function (e) {
+      if (e.target.closest && e.target.closest("a")) keep();
+    });
   }
 
   document.querySelectorAll("table.sortable").forEach(setup);
@@ -148,4 +214,167 @@
   document.querySelectorAll("[data-nojs]").forEach(function (el) {
     el.hidden = true;
   });
+})();
+
+/* --- 3. checkbox comboboxes ------------------------------------------------
+ *
+ * <select multiple data-combo="category"> is drawn as a button and a dropdown
+ * of checkboxes. Ticking a box applies it: the form submits after a short
+ * pause, so a run of ticks is still one page load, and the menu re-opens on
+ * the way back — the table updates underneath it and you carry on ticking.
+ * Applying only once the menu was dismissed was the first cut, and it read as
+ * nothing happening at all (user, 2026-08-27).
+ *
+ * The <select> itself stays in the form, hidden, and is what actually carries
+ * the values: ticking a box selects its <option>. So with JavaScript off the
+ * page keeps the native multi-select and its data-nojs submit button, and the
+ * server sees the same request either way.
+ *
+ * Nothing ticked means no filter. "All" and "none" are the same request, which
+ * is why there is a "clear" and no "select all".
+ */
+(function () {
+  "use strict";
+
+  var SETTLE = 250; // ms of quiet before the page load; batches a run of ticks
+  var OPEN = "gv:combo:";
+  var open = null; // at most one menu is open at a time
+
+  // Which menu was open when the page submitted itself, so it can be put back
+  // where it was instead of closing under the user mid-gesture.
+  function openKey(select) {
+    return OPEN + location.pathname + ":" + select.name;
+  }
+
+  function remember(select, isOpen) {
+    try {
+      if (isOpen) sessionStorage.setItem(openKey(select), "1");
+      else sessionStorage.removeItem(openKey(select));
+    } catch (e) {
+      /* no storage: the menu just doesn't reopen */
+    }
+  }
+
+  function wasOpen(select) {
+    try {
+      return sessionStorage.getItem(openKey(select)) === "1";
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function picked(select) {
+    return Array.prototype.filter.call(select.options, function (option) {
+      return option.selected;
+    });
+  }
+
+  function build(select) {
+    var combo = document.createElement("div");
+    combo.className = "combo";
+
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "combo-btn";
+    button.setAttribute("aria-expanded", "false");
+
+    var menu = document.createElement("div");
+    menu.className = "combo-menu";
+    menu.hidden = true;
+
+    var boxes = [];
+    var settling = null;
+
+    function relabel() {
+      var chosen = picked(select);
+      var summary = "all";
+      if (chosen.length === 1) summary = chosen[0].value;
+      else if (chosen.length > 1) summary = chosen.length + " picked";
+      button.textContent = select.dataset.combo + ": " + summary;
+      combo.classList.toggle("is-filtered", chosen.length > 0);
+      clear.disabled = chosen.length === 0;
+    }
+
+    // The label answers immediately; the page catches up once the ticking
+    // stops. One load for "groceries, rent, travel", not three.
+    function apply() {
+      relabel();
+      clearTimeout(settling);
+      settling = setTimeout(function () {
+        if (select.form) select.form.submit();
+      }, SETTLE);
+    }
+
+    Array.prototype.forEach.call(select.options, function (option) {
+      var row = document.createElement("label");
+      var box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = option.selected;
+      box.addEventListener("change", function () {
+        option.selected = box.checked;
+        apply();
+      });
+      row.appendChild(box);
+      row.appendChild(document.createTextNode(option.text.trim()));
+      menu.appendChild(row);
+      boxes.push(box);
+    });
+
+    var tools = document.createElement("div");
+    tools.className = "combo-tools";
+    var clear = document.createElement("button");
+    clear.type = "button";
+    clear.textContent = "clear";
+    clear.addEventListener("click", function () {
+      boxes.forEach(function (box, i) {
+        box.checked = false;
+        select.options[i].selected = false;
+      });
+      apply();
+    });
+    tools.appendChild(clear);
+    menu.appendChild(tools);
+
+    function show() {
+      if (open && open !== hide) open();
+      menu.hidden = false;
+      button.setAttribute("aria-expanded", "true");
+      open = hide;
+      remember(select, true);
+    }
+
+    function hide() {
+      if (menu.hidden) return;
+      menu.hidden = true;
+      button.setAttribute("aria-expanded", "false");
+      open = null;
+      remember(select, false);
+    }
+
+    button.addEventListener("click", function () {
+      if (menu.hidden) show();
+      else hide();
+    });
+
+    combo.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") {
+        button.focus();
+        hide();
+      }
+    });
+
+    document.addEventListener("click", function (e) {
+      if (!menu.hidden && !combo.contains(e.target)) hide();
+    });
+
+    relabel();
+    combo.appendChild(button);
+    combo.appendChild(menu);
+    select.parentNode.insertBefore(combo, select);
+    select.hidden = true; // still submitted — it's what holds the values
+
+    if (wasOpen(select)) show();
+  }
+
+  document.querySelectorAll("select[multiple][data-combo]").forEach(build);
 })();

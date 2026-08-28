@@ -136,6 +136,52 @@ def test_the_editor_stays_open_when_the_answer_is_an_error(ledger):
     assert "<select" in cell(r.text, "Rent")
 
 
+def test_the_filter_rides_on_the_form_action_and_comes_back(ledger):
+    """Filter, categorize, and you're still looking at the same filtered list —
+    the picks are on the action URL rather than in a hidden field per row."""
+    html = ledger.get(f"{MONTH}&acct=checking").text
+    assert 'action="/month/categorize?acct=checking"' in html
+
+    tid = transaction_id("Rent")
+    r = ledger.post(
+        "/month/categorize?acct=checking",
+        data={
+            "y": 2026,
+            "mo": 5,
+            "tid": tid,
+            "scope": "one",
+            "category": "rent",
+            "account": "checking",
+            "date": "2026-05-20",
+            "description": "Rent",
+            "amount": -2000.0,
+            "asset": "USD",
+        },
+        follow_redirects=False,
+    )
+    assert r.headers["location"] == f"/month?y=2026&mo=5&acct=checking#t{tid}"
+    assert categories()["Rent"] == "rent"
+
+
+def test_an_error_while_filtering_keeps_the_filter(ledger):
+    r = ledger.post(
+        "/month/categorize?acct=checking",
+        data={
+            "y": 2026,
+            "mo": 5,
+            "scope": "all",
+            "category": "",
+            "account": "checking",
+            "date": "2026-05-20",
+            "description": "Rent",
+            "amount": -2000.0,
+            "asset": "USD",
+        },
+    )
+    assert r.status_code == 400 and "Pick a category first." in r.text
+    assert "Buy VFIAX" not in r.text  # still the filtered list
+
+
 def test_submitting_lands_back_on_the_row(ledger):
     tid = transaction_id("Rent")
     r = post(ledger, "Rent", "rent", "one", tid=tid, follow_redirects=False)

@@ -767,7 +767,8 @@ class Vault:
         start_date: datetime.date | str | None = None,
         end_date: datetime.date | str | None = None,
     ) -> pd.DataFrame:
-        """Return the ledger, with account and asset details joined in.
+        """Return the ledger, with account and asset details joined in and each
+        transaction valued at its own date's price.
 
         Without arguments this returns every transaction. Give a start date, an
         end date, or both to narrow it to a date range.
@@ -789,23 +790,56 @@ class Vault:
             - ``amount`` — signed amount, in the transaction's asset
             - ``asset`` — name of the asset the amount is denominated in
             - ``category`` — the transaction's category, ``"unclassified"`` if none
+            - ``price`` — the asset's price on that date: ``1.0`` for the base currency, ``NaN`` if not priced by then
+            - ``market_value`` — ``amount`` × ``price``, in the base currency
             - ``ownership_share`` — your fraction of the account
             - ``account_group_name`` — the account's group label
+
+            ``market_value`` is the whole transaction, not your share of it:
+            multiply by ``ownership_share`` for that.
 
         Examples:
             ```python
             v.list_transactions()
-            #    transaction_id account_name       date    description   amount asset      category  ownership_share account_group_name
-            # 0               1     checking 2026-07-01  WHOLEFDS #123   -40.00   USD     groceries              1.0               cash
-            # 1               2    brokerage 2026-07-02        buy VTI -1000.00   USD  unclassified              1.0        investments
-            # 2               3    brokerage 2026-07-02        buy VTI     3.20   VTI  unclassified              1.0        investments
+            #    transaction_id account_name       date    description   amount asset      category  price  market_value  ownership_share account_group_name
+            # 0               1     checking 2026-07-01  WHOLEFDS #123   -40.00   USD     groceries    1.0        -40.00              1.0               cash
+            # 1               2    brokerage 2026-07-02        buy VTI -1000.00   USD  unclassified    1.0      -1000.00              1.0        investments
+            # 2               3    brokerage 2026-07-02        buy VTI     3.20   VTI  unclassified  312.5       1000.00              1.0        investments
 
             v.list_transactions(start_date="2026-07-02")
-            #    transaction_id account_name       date description   amount asset      category  ownership_share account_group_name
-            # 0               2    brokerage 2026-07-02     buy VTI -1000.00   USD  unclassified              1.0        investments
-            # 1               3    brokerage 2026-07-02     buy VTI     3.20   VTI  unclassified              1.0        investments
+            #    transaction_id account_name       date description   amount asset      category  price  market_value  ownership_share account_group_name
+            # 0               2    brokerage 2026-07-02     buy VTI -1000.00   USD  unclassified    1.0      -1000.00              1.0        investments
+            # 1               3    brokerage 2026-07-02     buy VTI     3.20   VTI  unclassified  312.5       1000.00              1.0        investments
             ```
         """
+        df = self._ledger(start_date=start_date, end_date=end_date)
+        df["price"] = self._prices_per_row(df)
+        # astype keeps the column float on an empty ledger, where the amounts
+        # come back from SQLite as an object column.
+        df["market_value"] = (df["amount"] * df["price"]).astype(float).round(2)
+        return df[
+            [
+                "transaction_id",
+                "account_name",
+                "date",
+                "description",
+                "amount",
+                "asset",
+                "category",
+                "price",
+                "market_value",
+                "ownership_share",
+                "account_group_name",
+            ]
+        ]
+
+    def _ledger(
+        self,
+        *,
+        start_date: datetime.date | str | None = None,
+        end_date: datetime.date | str | None = None,
+    ) -> pd.DataFrame:
+        """The ledger without prices, for callers that price it themselves."""
         # Dates are stored as "YYYY-MM-DD" text, which sorts and compares
         # correctly as-is, so the bounds only need the same formatting.
         where = []
@@ -844,6 +878,24 @@ class Vault:
         df["date"] = pd.to_datetime(df["date"])
         df["category"] = df["category"].fillna(UNCLASSIFIED)
         return df
+
+    def _prices_per_row(self, ledger: pd.DataFrame) -> pd.Series:
+        """Price of each row's asset on that row's date.
+
+        Priced as one grid of the distinct dates by the distinct assets, then
+        read off with integer lookups — one query and no per-row work, however
+        long the ledger is.
+        """
+        if ledger.empty:
+            return pd.Series(dtype=float, index=ledger.index)
+
+        dates = pd.DatetimeIndex(ledger["date"])
+        assets = pd.Index(ledger["asset"])
+        grid_dates = dates.unique().sort_values()
+        grid_assets = assets.unique()
+        grid = self.get_asset_prices(grid_dates, list(grid_assets)).to_numpy()
+        values = grid[grid_dates.get_indexer(dates), grid_assets.get_indexer(assets)]
+        return pd.Series(values, index=ledger.index)
 
     def add_category(self, categories: str | Sequence[str]) -> None:
         """Define a category that rules and exceptions can then use.
@@ -1589,14 +1641,39 @@ class Vault:
 
         req_dates = pd.to_datetime(list(dates))
         unique_ids = list(dict.fromkeys(asset_ids))
+        placeholders = ",".join("?" * len(unique_ids))
+        first = req_dates.min().strftime("%Y-%m-%d")
+        last = req_dates.max().strftime("%Y-%m-%d")
+
+        # Read only the quotes that can reach the requested dates. Anything
+        # older than the newest quote any asset has at or before the first
+        # requested date is superseded, so it cannot change a single cell —
+        # and a narrow request against years of price history is the common
+        # case (one date, or one month of a ledger).
+        floor = first
+        if fill_missing_with_stale:
+            carried = self._read_df(
+                f"""
+                SELECT MIN(last_before) FROM (
+                    SELECT MAX(price_date) AS last_before
+                    FROM prices
+                    WHERE asset_id IN ({placeholders})
+                      AND price_date <= ?
+                    GROUP BY asset_id
+                )
+                ;""",
+                (*unique_ids, first),
+            )
+            floor = carried.iat[0, 0] or first
+
         stored = self._read_df(
             f"""
             SELECT asset_id, price_date, price
             FROM prices
-            WHERE asset_id IN ({",".join("?" * len(unique_ids))})
-              AND price_date <= ?
+            WHERE asset_id IN ({placeholders})
+              AND price_date BETWEEN ? AND ?
             ;""",
-            (*unique_ids, req_dates.max().strftime("%Y-%m-%d")),
+            (*unique_ids, floor, last),
         )
 
         wide = stored.pivot(index="price_date", columns="asset_id", values="price")
@@ -1664,7 +1741,7 @@ class Vault:
         if group_by not in valid:
             raise ValueError(f"group_by must be one of {valid}, got {group_by!r}")
 
-        ledger = self.list_transactions()
+        ledger = self._ledger()
         if ledger.empty:
             return pd.DataFrame(index=pd.DatetimeIndex([], name="date"))
 
@@ -1754,7 +1831,7 @@ class Vault:
             "market_value",
             "last_transaction",
         ]
-        ledger = self.list_transactions()
+        ledger = self._ledger()
         held = (
             ledger.groupby(
                 ["account_name", "account_group_name", "asset"], dropna=False, sort=False

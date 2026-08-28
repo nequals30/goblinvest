@@ -138,10 +138,11 @@ def test_the_picker_is_a_get_form_so_it_works_without_javascript(with_transactio
 
 def test_rows_carry_machine_readable_sort_values(with_transactions):
     html = with_transactions.get("/month?y=2026&mo=5").text
-    assert 'data-sort="2026-05-20"' in html  # ISO date, not the displayed "May 20"
+    assert 'data-sort="2026-05-20"' in html  # ISO date, not the displayed "5/20"
+    assert ">5/20<" in html  # short and numeric; the column is one cell wide
     assert 'data-sort="-2000.0"' in html  # raw number, not "-2,000.00"
     assert "-2,000.00" in html  # displayed value is still formatted
-    assert 'class="num neg"' in html  # negatives marked for styling
+    assert 'class="num mv neg"' in html  # negatives marked for styling
 
 
 def test_table_is_marked_sortable_with_typed_columns(with_transactions):
@@ -153,6 +154,107 @@ def test_table_is_marked_sortable_with_typed_columns(with_transactions):
 
 def test_non_usd_asset_shows_its_own_asset_column(with_transactions):
     assert "VFIAX" in with_transactions.get("/month?y=2026&mo=5").text
+
+
+def test_the_base_currency_is_left_out_of_the_asset_column(with_transactions):
+    """Every row would say USD, so only the ones that don't are worth reading."""
+    html = with_transactions.get("/month?y=2026&mo=5").text
+    assert ">USD<" not in html  # never as a cell's text...
+    assert 'value="USD"' in html  # ...but still the natural key in the form
+
+
+def test_market_value_is_the_amount_in_the_base_currency(with_transactions):
+    """Core prices each row at its own date; a base-currency row is 1:1."""
+    html = with_transactions.get("/month?y=2026&mo=5").text
+    assert "market value" in html
+    rent = next(row for row in body_rows(html) if "Rent" in row)
+    assert rent.count("-2,000.00") == 2  # amount and market value, side by side
+    assert 'class="num mv neg"' in rent and rent.count('data-sort="-2000.0"') == 2
+
+
+def test_an_unpriced_asset_has_no_market_value(with_transactions):
+    """VFIAX has no stored price, so core hands back NaN — which is a dash
+    here, never the string "nan"."""
+    rows = body_rows(with_transactions.get("/month?y=2026&mo=5").text)
+    row = next(r for r in rows if "VFIAX" in r)
+    assert "unpriced" in row and "—" in row
+    assert "nan" not in row.lower()
+
+
+def test_the_month_table_is_not_paginated(with_transactions):
+    """A month is ~30 rows. The pager stays in app.js for tables that need it."""
+    assert "data-page-size" not in with_transactions.get("/month").text
+
+
+def test_the_scope_buttons_have_no_paragraph_explaining_them(with_transactions):
+    assert "categorizes every transaction" not in with_transactions.get("/month").text
+
+
+# --- filtering ---------------------------------------------------------------
+
+
+def test_the_table_names_itself_so_a_sort_can_be_carried_across_one_load(with_transactions):
+    """app.js keeps the sort only over a submit from inside the table, and the
+    error re-render happens at /month/categorize — the key is what ties them."""
+    assert 'data-sort-key="month"' in with_transactions.get("/month").text
+
+
+def test_the_account_filter_comes_before_the_category_one(with_transactions):
+    html = with_transactions.get("/month?y=2026&mo=5").text
+    assert html.index('id="f-acct"') < html.index('id="f-cat"')
+
+
+def test_filters_offer_the_values_present_in_the_month(with_transactions):
+    html = with_transactions.get("/month?y=2026&mo=5").text
+    accounts, _ = select_options(html, "f-acct")
+    assert accounts == ["brokerage", "checking"]
+    categories, _ = select_options(html, "f-cat")
+    assert categories == ["unclassified"]  # nothing categorized yet
+
+
+def test_filtering_by_account_narrows_the_rows(with_transactions):
+    html = with_transactions.get("/month?y=2026&mo=5&acct=brokerage").text
+    rows = body_rows(html)
+    assert len(rows) == 1 and "VFIAX" in rows[0]
+    assert "1 of 3 transactions" in html
+    assert select_options(html, "f-acct")[1] == "brokerage"  # the pick sticks
+
+
+def test_several_picks_are_a_union(with_transactions):
+    with vaults.open_vault(1) as v:
+        v.add_account("savings", account_group_name="cash")
+        v.add_transactions("savings", ["2026-05-04"], ["Interest"], [1.25])
+    two = with_transactions.get("/month?y=2026&mo=5&acct=savings&acct=brokerage").text
+    assert len(body_rows(two)) == 2
+
+
+def test_an_empty_pick_means_every_row(with_transactions):
+    assert len(body_rows(with_transactions.get("/month?y=2026&mo=5").text)) == 3
+
+
+def test_a_filter_matching_nothing_says_so_and_keeps_the_control(with_transactions):
+    html = with_transactions.get("/month?y=2026&mo=5&acct=hovercraft").text
+    assert body_rows(html) == []
+    assert "No transactions match." in html
+    # The value isn't in this month, but the control applying it must still show it.
+    assert select_options(html, "f-acct") == (["brokerage", "checking", "hovercraft"], "hovercraft")
+
+
+def test_the_filter_survives_stepping_to_another_month(with_transactions):
+    html = with_transactions.get("/month?y=2026&mo=5&acct=checking").text
+    assert '<input type="hidden" name="acct" value="checking" />' in picker(html)
+
+
+def test_the_filter_is_a_get_form_that_works_without_javascript(with_transactions):
+    html = with_transactions.get("/month?y=2026&mo=5").text
+    assert '<form class="filters" method="get" action="/month">' in html
+    assert 'name="acct" multiple' in html  # a plain multi-select underneath
+    assert "data-combo" in html  # which app.js upgrades
+
+
+def test_the_clear_link_appears_only_while_filtering(with_transactions):
+    assert 'class="clear"' not in with_transactions.get("/month?y=2026&mo=5").text
+    assert 'class="clear"' in with_transactions.get("/month?y=2026&mo=5&acct=checking").text
 
 
 def test_empty_vault_says_so(signed_up):

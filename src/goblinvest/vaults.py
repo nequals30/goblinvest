@@ -99,6 +99,18 @@ def define_category(vault: Any, name: str) -> None:
     apply_categories(vault)
 
 
+def base_asset(vault: Any) -> str:
+    """The vault's base currency, e.g. `"USD"`.
+
+    Asset 1 by core's definition — the currency every market value is expressed
+    in. Pages use it to leave the asset column blank on the rows that are simply
+    in it, so only the exceptions (VFIAX, EUR) are worth reading.
+    """
+    assets = vault.list_assets()
+    named = assets.loc[assets["asset_id"] == 1, "asset_name"]
+    return str(named.iloc[0]) if len(named) else ""
+
+
 def _as_date(value: Any) -> date | None:
     """A pandas Timestamp (or NaT) as a plain `date`, so the rest of this
     project never has to think about pandas' missing-value types."""

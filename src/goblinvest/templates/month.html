@@ -10,6 +10,11 @@
      step relative to it. Works with JavaScript off; the selects just need the
      fallback "go" button then. #}
   <form class="picker" method="get" action="/month">
+    {# The filter is page state, so stepping to another month keeps it. #}
+    {% for filter in filters %}{% for value in filter.picked %}
+    <input type="hidden" name="{{ filter.name }}" value="{{ value }}" />
+    {% endfor %}{% endfor %}
+
     <button type="submit" name="step" value="-1" class="step"
             title="previous month" {% if not has_older %}disabled{% endif %}>‹</button>
 
@@ -47,27 +52,63 @@
 <p class="muted">No transactions yet. Import some statements and they'll show up here.</p>
 {% else %}
 
+{% if n_total or filter_qs %}
+{# Native multi-selects, upgraded by app.js into checkbox dropdowns. With no
+   JavaScript they stay as they are and the "filter" button submits them. #}
+<form class="filters" method="get" action="/month">
+  <input type="hidden" name="y" value="{{ selected.year }}" />
+  <input type="hidden" name="mo" value="{{ selected.month }}" />
+  {% for filter in filters %}
+  <label class="sr-only" for="f-{{ filter.name }}">{{ filter.label }}</label>
+  <select id="f-{{ filter.name }}" name="{{ filter.name }}" multiple size="4"
+          data-combo="{{ filter.label }}">
+    {% for option in filter.options %}
+    <option value="{{ option }}" {% if option in filter.picked %}selected{% endif %}>{{ option }}</option>
+    {% endfor %}
+  </select>
+  {% endfor %}
+  <button type="submit" class="go" data-nojs>filter</button>
+  {% if filter_qs %}
+  <a class="clear" href="/month?y={{ selected.year }}&amp;mo={{ selected.month }}">clear</a>
+  {% endif %}
+</form>
+{% endif %}
+
 <div class="table-wrap">
-  <table class="grid sortable dense" data-page-size="100">
+  {# No data-page-size: a month is ~30 rows. The pager in app.js stays for the
+     tables that will need it. data-sort-key names the table across paths, so a
+     categorize that comes back with an error (rendered at /month/categorize)
+     is still recognisably the same table as /month. #}
+  <table class="grid sortable dense" data-sort-key="month">
     <thead>
       <tr>
-        <th data-type="date">date</th>
+        <th data-type="date" class="c-date">date</th>
         <th data-type="text">account</th>
         <th data-type="text">description</th>
         <th data-type="number" class="num">amount</th>
         <th data-type="text">asset</th>
+        <th data-type="number" class="num">market value</th>
         <th data-type="text">category</th>
       </tr>
     </thead>
     <tbody>
       {% for row in rows %}
       <tr>
-        <td data-sort="{{ row.date.isoformat() }}">{{ row.date.strftime("%b %-d") }}</td>
+        <td class="c-date" data-sort="{{ row.date.isoformat() }}">{{ row.date.strftime("%-m/%-d") }}</td>
         <td>{{ row.account }}</td>
         <td class="desc">{{ row.description }}</td>
-        <td class="num {% if row.amount < 0 %}neg{% endif %}"
-            data-sort="{{ row.amount }}">{{ "{:,.2f}".format(row.amount) }}</td>
-        <td>{{ row.asset }}</td>
+        {# The amount is in the row's own asset; the market value is what it is
+           worth in the base currency, so that's the column that carries the
+           weight — and the one the eye should land on. #}
+        <td class="num amt" data-sort="{{ row.amount }}">{{ "{:,.2f}".format(row.amount) }}</td>
+        <td>{% if row.asset != base_asset %}{{ row.asset }}{% endif %}</td>
+        {% if row.market_value is none %}
+        {# Core prices a row at its own date; no stored price by then, no value. #}
+        <td class="num mv unpriced" data-sort="">—</td>
+        {% else %}
+        <td class="num mv {% if row.market_value < 0 %}neg{% endif %}"
+            data-sort="{{ row.market_value }}">{{ "{:,.2f}".format(row.market_value) }}</td>
+        {% endif %}
         {# Unclassified rows are the work, so they carry the editor. A row that
            already has a category is just its name until the pencil is clicked,
            which is a GET back here with ?edit=<id> — so one row at a time holds
@@ -78,10 +119,11 @@
           {% if not unset and row.id != edit %}
           <span class="cat-name">{{ row.category }}</span>
           <a class="edit" title="change category"
-             href="/month?y={{ selected.year }}&amp;mo={{ selected.month }}&amp;edit={{ row.id }}#t{{ row.id }}"
+             href="/month?y={{ selected.year }}&amp;mo={{ selected.month }}&amp;edit={{ row.id }}{% if filter_qs %}&amp;{{ filter_qs }}{% endif %}#t{{ row.id }}"
              ><span class="sr-only">change category</span>✎</a>
           {% else %}
-          <form method="post" action="/month/categorize" class="cat-form">
+          {# The filter rides on the action URL, not in a hidden field per row. #}
+          <form method="post" action="/month/categorize{% if filter_qs %}?{{ filter_qs }}{% endif %}" class="cat-form">
             {{ csrf_input }}
             <input type="hidden" name="y" value="{{ selected.year }}" />
             <input type="hidden" name="mo" value="{{ selected.month }}" />
@@ -113,14 +155,16 @@
   </table>
 
   {% if not rows %}
-  <p class="muted">No transactions in {{ selected.label }}.</p>
+  <p class="muted">
+    {% if filter_qs %}No transactions match.{% else %}No transactions in {{ selected.label }}.{% endif %}
+  </p>
   {% endif %}
-  <p class="hint">{{ rows|length }} transaction{{ "" if rows|length == 1 else "s" }}. Click a column to sort.</p>
-
-  <p class="hint cat-foot">
-    <strong>all</strong> categorizes every transaction with that description, now and in
-    statements you load later. <strong>this</strong> categorizes only that one row and beats
-    any rule — so a row pinned that way keeps its category when a rule changes.
+  <p class="hint">
+    {%- if rows|length != n_total -%}
+    {{ rows|length }} of {{ n_total }} transactions
+    {%- else -%}
+    {{ n_total }} transaction{{ "" if n_total == 1 else "s" }}
+    {%- endif %}. Click a column to sort.
   </p>
 </div>
 {% endif %}

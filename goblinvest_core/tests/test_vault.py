@@ -325,6 +325,8 @@ class TestTransactions:
             "amount",
             "asset",
             "category",
+            "price",
+            "market_value",
             "ownership_share",
             "account_group_name",
         ]
@@ -462,6 +464,79 @@ class TestListTransactionsDateRange:
         assert df["date"].tolist() == [pd.Timestamp("2026-08-01")]
         assert df["asset"].tolist() == ["USD"]
         assert df["category"].tolist() == ["unclassified"]
+
+
+class TestListTransactionsMarketValue:
+    @pytest.fixture
+    def vault(self, filepath):
+        with Vault.create(filepath) as v:
+            v.add_account("checking")
+            v.add_account("joint", ownership_share=0.5)
+            v.add_asset("NVDA")
+            v.add_transactions(
+                ["checking", "checking", "checking", "joint"],
+                ["2024-06-03", "2024-06-05", "2024-06-08", "2024-06-05"],
+                ["paycheck", "buy NVDA", "buy NVDA again", "buy NVDA"],
+                [1000.0, 2.0, 1.0, 2.0],
+                assets=["USD", "NVDA", "NVDA", "NVDA"],
+            )
+            with v._conn:  # NVDA is asset 2
+                v._conn.executemany(
+                    "INSERT INTO prices (asset_id, price_date, price) VALUES (?, ?, ?)",
+                    [(2, "2024-06-05", 120.0), (2, "2024-06-07", 125.5)],
+                )
+            yield v
+
+    def _row(self, vault, description):
+        df = vault.list_transactions()
+        return df[df["description"] == description].iloc[0]
+
+    def test_base_currency_is_priced_at_one(self, vault):
+        row = self._row(vault, "paycheck")
+        assert row["price"] == 1.0
+        assert row["market_value"] == 1000.0
+
+    def test_priced_on_the_transactions_own_date(self, vault):
+        row = self._row(vault, "buy NVDA")
+        assert row["price"] == 120.0
+        assert row["market_value"] == 240.0
+
+    def test_a_date_without_a_quote_uses_the_last_known_price(self, vault):
+        # 2024-06-08 is a Saturday; the Friday quote carries forward.
+        row = self._row(vault, "buy NVDA again")
+        assert row["price"] == 125.5
+        assert row["market_value"] == 125.5
+
+    def test_unpriced_asset_gives_nan(self, vault):
+        vault.add_asset("VTI")
+        vault.add_transactions("checking", ["2024-06-05"], ["buy VTI"], [3.0], assets="VTI")
+        row = self._row(vault, "buy VTI")
+        assert pd.isna(row["price"])
+        assert pd.isna(row["market_value"])
+
+    def test_market_value_is_the_whole_transaction_not_your_share(self, vault):
+        # The joint account is half owned; the row still values what moved.
+        row = self._row(vault, "buy NVDA")
+        joint = vault.list_transactions()
+        joint = joint[joint["account_name"] == "joint"].iloc[0]
+        assert joint["ownership_share"] == 0.5
+        assert joint["market_value"] == row["market_value"] == 240.0
+
+    def test_market_value_is_rounded_to_cents(self, vault):
+        with vault._conn:
+            vault._conn.execute(
+                "INSERT INTO prices (asset_id, price_date, price) VALUES (2, ?, ?)",
+                ("2024-06-03", 0.3333),
+            )
+        vault.add_transactions("checking", ["2024-06-03"], ["odd lot"], [3.0], assets="NVDA")
+        assert self._row(vault, "odd lot")["market_value"] == 1.0
+
+    def test_empty_ledger_still_has_float_columns(self, filepath):
+        with Vault.create(filepath) as v:
+            df = v.list_transactions()
+        assert df.empty
+        assert df["price"].dtype == float
+        assert df["market_value"].dtype == float
 
 
 def _yahoo_history(rows):
@@ -628,6 +703,16 @@ class TestPrices:
         out = vault.get_asset_prices(["2024-06-07"], ["nvda", "USD"])
         assert list(out.columns) == ["nvda", "USD"]
         assert out["nvda"].tolist() == [121.0]
+
+    def test_stale_fill_reaches_back_past_a_fresher_assets_quotes(self, vault):
+        # Only quotes that can still reach the requested dates are read; the
+        # cutoff has to follow the *stalest* asset, or NVDA loses its price.
+        vault.add_asset("VTI")
+        self._seed(vault, [(2, "2024-01-05", 100.0), (3, "2024-06-01", 200.0)])
+
+        out = vault.get_asset_prices(["2024-06-10"], ["NVDA", "VTI"])
+        assert out["NVDA"].tolist() == [100.0]
+        assert out["VTI"].tolist() == [200.0]
 
     def test_get_prices_unregistered_asset_raises(self, vault):
         with pytest.raises(ValueError, match="DOGE"):

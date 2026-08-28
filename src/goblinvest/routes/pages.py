@@ -3,9 +3,12 @@
 No finance logic here — these are thin renderers over what core returns.
 """
 
+import math
+from collections.abc import Sequence
 from typing import Annotated
+from urllib.parse import urlencode
 
-from fastapi import APIRouter, Form, HTTPException, Request, status
+from fastapi import APIRouter, Form, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 
 from goblinvest import months, vaults
@@ -46,6 +49,16 @@ def csv_import(request: Request, user: CurrentUser, nav: Nav):
     return _placeholder(request, user, nav, *PLACEHOLDERS["/import"])
 
 
+def _number(value) -> float | None:
+    """A core float as a plain one, or `None` where core had no answer.
+
+    `market_value` is NaN for an asset with no stored price by that date. NaN is
+    a pandas-ism, and this is the boundary it stops at.
+    """
+    number = float(value)
+    return None if math.isnan(number) else number
+
+
 def _rows(frame) -> list[dict]:
     """Core's DataFrame as plain Python dicts, so the template never touches
     pandas types. No arithmetic here — the numbers pass through untouched."""
@@ -57,10 +70,55 @@ def _rows(frame) -> list[dict]:
             "description": row.description,
             "amount": float(row.amount),
             "asset": row.asset,
+            "market_value": _number(row.market_value),
             "category": row.category,
         }
         for row in frame.itertuples()
     ]
+
+
+# --- filtering the month's rows ----------------------------------------------
+#
+# Selecting which of the month's rows to show is not finance logic — nothing
+# here computes anything, it only decides what the table lists. Core is asked
+# for one month (~30 rows), so filtering that in memory costs nothing; a table
+# big enough for it to matter is the point at which `list_transactions` should
+# take the filter itself (request #6's neighbour).
+
+
+def _keep(row: dict, cats: Sequence[str], accts: Sequence[str]) -> bool:
+    """An empty pick means "all", not "none" — that's what an untouched
+    checkbox list submits, and it has to read as no filter at all."""
+    return (not cats or row["category"] in cats) and (not accts or row["account"] in accts)
+
+
+def _options(rows: list[dict], key: str, picked: Sequence[str]) -> list[str]:
+    """What one filter offers: the values in this month, plus anything already
+    picked that isn't in it — so a filter never disappears from the control
+    that is applying it."""
+    return sorted({row[key] for row in rows} | set(picked), key=str.lower)
+
+
+def _filters(rows: list[dict], cats: Sequence[str], accts: Sequence[str]) -> list[dict]:
+    return [
+        {
+            "name": name,
+            "label": label,
+            "options": _options(rows, key, picked),
+            "picked": set(picked),
+        }
+        # Account first: it's the coarser cut, and the one reached for more.
+        for name, label, key, picked in (
+            ("acct", "account", "account", accts),
+            ("cat", "category", "category", cats),
+        )
+    ]
+
+
+def _filter_qs(cats: Sequence[str], accts: Sequence[str]) -> str:
+    """The picks as a query string, for every link and form that has to carry
+    them across a page load."""
+    return urlencode([("cat", c) for c in cats] + [("acct", a) for a in accts])
 
 
 def _selected_month(available: list[months.Month], y: int | None, mo: int | None, step: int):
@@ -88,6 +146,8 @@ def _month_page(
     step: int = 0,
     *,
     edit: int | None = None,
+    cats: Sequence[str] = (),
+    accts: Sequence[str] = (),
     error: str = "",
     status_code: int = 200,
 ):
@@ -98,6 +158,8 @@ def _month_page(
     are still unclassified always render the editor; a classified row renders
     its category as text until its pencil is clicked, which is a plain GET back
     to this page. That keeps one `<select>` on the page instead of one per row.
+
+    `cats` and `accts` are the filter picks, straight from the query string.
     """
     try:
         with vaults.open_vault(user.id) as vault:
@@ -115,8 +177,19 @@ def _month_page(
             )
             # Every defined category, for the dropdown in each row.
             categories = [str(name) for name in vault.list_categories()["category_name"]]
+            base_asset = vaults.base_asset(vault)
     except vaults.VaultMissing:
-        return page(request, "month.html", user, nav, no_vault=True, years=[], rows=[])
+        return page(
+            request,
+            "month.html",
+            user,
+            nav,
+            no_vault=True,
+            years=[],
+            rows=[],
+            filters=[],
+            filter_qs="",
+        )
 
     return page(
         request,
@@ -128,7 +201,11 @@ def _month_page(
         selected=selected,
         has_older=selected is not None and selected > available[0],
         has_newer=selected is not None and selected < available[-1],
-        rows=rows,
+        rows=[row for row in rows if _keep(row, cats, accts)],
+        n_total=len(rows),
+        filters=_filters(rows, cats, accts),
+        filter_qs=_filter_qs(cats, accts),
+        base_asset=base_asset,
         categories=categories,
         edit=edit,
         error=error,
@@ -141,12 +218,18 @@ def month_view(
     request: Request,
     user: CurrentUser,
     nav: Nav,
+    # The filter picks. Repeatable query params — ?cat=rent&cat=groceries — and
+    # `default_factory` rather than `= []`, so the absent case is a fresh list
+    # per request. They come first only because a parameter with no default
+    # can't follow one that has it.
+    cat: Annotated[list[str], Query(default_factory=list)],
+    acct: Annotated[list[str], Query(default_factory=list)],
     y: int | None = None,
     mo: int | None = None,
     step: int = 0,
     edit: int | None = None,
 ):
-    return _month_page(request, user, nav, y, mo, step, edit=edit)
+    return _month_page(request, user, nav, y, mo, step, edit=edit, cats=cat, accts=acct)
 
 
 # --- categorizing from the month table ---------------------------------------
@@ -170,6 +253,11 @@ def categorize(
     description: Annotated[str, Form()],
     amount: Annotated[float, Form()],
     asset: Annotated[str, Form()],
+    # The filter picks, read off the form's *action* rather than out of hidden
+    # inputs: it's one state for the whole page, and hidden fields would repeat
+    # it in every row of the table.
+    cat: Annotated[list[str], Query(default_factory=list)],
+    acct: Annotated[list[str], Query(default_factory=list)],
     # Defaulted, not required: an empty <select> submits as a *missing* field,
     # and a 422 is the wrong answer to "you didn't pick one".
     category: Annotated[str, Form()] = "",
@@ -177,10 +265,20 @@ def categorize(
 ):
     # The row's id only steers the page: it lands the browser back on the row
     # (#t<id>), and on an error it keeps that row's editor open.
-    back = f"/month?y={y}&mo={mo}" + (f"#t{tid}" if tid else "")
+    qs = _filter_qs(cat, acct)
+    back = f"/month?y={y}&mo={mo}" + (f"&{qs}" if qs else "") + (f"#t{tid}" if tid else "")
     if not category.strip():
         return _month_page(
-            request, user, nav, y, mo, edit=tid, error="Pick a category first.", status_code=400
+            request,
+            user,
+            nav,
+            y,
+            mo,
+            edit=tid,
+            cats=cat,
+            accts=acct,
+            error="Pick a category first.",
+            status_code=400,
         )
     try:
         with vaults.open_vault(user.id) as vault:
@@ -197,7 +295,16 @@ def categorize(
         return _redirect(back)
     except vaults.CORE_ERRORS as exc:
         return _month_page(
-            request, user, nav, y, mo, edit=tid, error=vaults.explain(exc), status_code=400
+            request,
+            user,
+            nav,
+            y,
+            mo,
+            edit=tid,
+            cats=cat,
+            accts=acct,
+            error=vaults.explain(exc),
+            status_code=400,
         )
     return _redirect(back)
 

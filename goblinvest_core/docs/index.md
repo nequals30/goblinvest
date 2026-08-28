@@ -65,10 +65,17 @@ v.add_transactions(
 )
 
 v.list_transactions()
-#    transaction_id account_name       date description   amount asset  ownership_share account_group_name
-# 0               1    brokerage 2026-07-02     buy VTI -1000.00   USD              1.0        investments
-# 1               2    brokerage 2026-07-02     buy VTI     3.20   VTI              1.0        investments
+#    transaction_id account_name       date description   amount asset  price  market_value  ownership_share account_group_name
+# 0               1    brokerage 2026-07-02     buy VTI -1000.00   USD    1.0      -1000.00              1.0        investments
+# 1               2    brokerage 2026-07-02     buy VTI     3.20   VTI  312.5       1000.00              1.0        investments
 ```
+
+`price` is what the asset was worth on that transaction's date and
+`market_value` is the amount times that price, both in the base currency. The
+base currency itself is priced at 1.0, and an asset with no stored price by that
+date gives `NaN` for both — see [Market prices](#market-prices). The market
+value covers the whole transaction, not your share of a joint account; multiply
+by `ownership_share` for that.
 
 Deleting an account or an asset deletes its transactions too, so both ask you to
 confirm at the terminal first and do nothing unless you answer `y`:
