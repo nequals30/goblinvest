@@ -211,6 +211,17 @@ table.grid tbody tr:hover { background: var(--row-hover); }
 table.grid td.amt { color: #8d8d8d; }
 table.grid td.mv { font-weight: 600; }
 table.grid td.mv.unpriced { color: var(--muted); font-weight: 400; }
+/* The totals row: part of the table, but plainly not one of its transactions.
+   Its label is ordinary text — uppercasing 11px type rendered fuzzily (user,
+   2026-08-30), and the rule above the row is separation enough. The market
+   value keeps the weight it has on every other row, from td.mv. */
+table.grid tfoot td {
+  border-top: 2px solid var(--muted);
+  border-bottom: 0;
+  padding-top: 4px;
+}
+/* the "× 0.5" the amount carries while ownership share is applied */
+table.grid td.amt .share { font-size: 11px; }
 
 /* header row: reads as a header, and the whole cell is the click target */
 table.grid thead th {
@@ -260,6 +271,25 @@ table.grid th[aria-sort="descending"] .sort-btn::after { content: " ↓"; opacit
   cursor: pointer;
 }
 .filters .clear { font-size: 12px; color: var(--muted); }
+/* The ownership-share toggle. It sits in the filter bar but is not one of the
+   filters, so it stands off to the right of them.
+
+   `margin: 0` is what keeps it level with the dropdowns, and it is not
+   optional: the global `form label` rule gives every label `margin-bottom: 8px`,
+   and `align-items: center` centres an item's *margin box* — so that 8px hangs
+   below the label and lifts what you can see by 4px. Same trap as the global
+   `form input` rule, one property over. `.combo-menu label` had to undo it too. */
+.filters .toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 0 0 18px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.filters .toggle input { margin: 0; cursor: pointer; }
 
 /* the checkbox dropdown app.js builds over each multi-select */
 .combo { position: relative; }

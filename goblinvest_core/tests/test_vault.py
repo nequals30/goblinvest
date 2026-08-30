@@ -523,6 +523,24 @@ class TestListTransactionsMarketValue:
         assert joint["ownership_share"] == 0.5
         assert joint["market_value"] == row["market_value"] == 240.0
 
+    def test_ownership_share_weights_the_market_value_on_request(self, vault):
+        df = vault.list_transactions(apply_ownership_share=True)
+        joint = df[df["account_name"] == "joint"].iloc[0]
+        whole = df[df["description"] == "buy NVDA"]
+        whole = whole[whole["account_name"] == "checking"].iloc[0]
+
+        assert joint["price"] == whole["price"] == 120.0  # the price is untouched
+        assert joint["market_value"] == 120.0  # half of 240
+        assert whole["market_value"] == 240.0
+
+    def test_weighted_market_value_is_rounded_to_cents(self, vault):
+        vault.add_account("third", ownership_share=1 / 3)
+        vault.add_transactions("third", ["2024-06-05"], ["split three ways"], [1.0], assets="NVDA")
+
+        df = vault.list_transactions(apply_ownership_share=True)
+        row = df[df["description"] == "split three ways"].iloc[0]
+        assert row["market_value"] == 40.0
+
     def test_market_value_is_rounded_to_cents(self, vault):
         with vault._conn:
             vault._conn.execute(

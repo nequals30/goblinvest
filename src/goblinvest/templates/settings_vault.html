@@ -61,15 +61,5 @@
     {% endif %}
   </form>
 </section>
-
-{% if kind.slug == "categories" %}
-<section class="pane">
-  <h2>Adjustments files</h2>
-  <form method="post" action="{{ kind.url }}/apply" class="row">
-    {{ csrf_input }}
-    <button type="submit">apply categories</button>
-  </form>
-</section>
-{% endif %}
 {% endif %}
 {% endblock %}

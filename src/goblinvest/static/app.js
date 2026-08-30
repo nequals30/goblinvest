@@ -196,18 +196,20 @@
   document.querySelectorAll("table.sortable").forEach(setup);
 })();
 
-/* --- 2. self-submitting selects -------------------------------------------
+/* --- 2. self-submitting controls -------------------------------------------
  *
- * <select data-autosubmit> picks a month without a second click. The form's
+ * [data-autosubmit] picks a month, or flips the ownership-share toggle, without
+ * a second click. Any control with the attribute counts — a <select> or a
+ * checkbox; both fire `change` when they settle on an answer. The form's
  * fallback button is marked data-nojs and hidden here, so the no-JavaScript
  * path keeps working.
  */
 (function () {
   "use strict";
 
-  document.querySelectorAll("select[data-autosubmit]").forEach(function (select) {
-    select.addEventListener("change", function () {
-      select.form.submit();
+  document.querySelectorAll("[data-autosubmit]").forEach(function (control) {
+    control.addEventListener("change", function () {
+      if (control.form) control.form.submit();
     });
   });
 

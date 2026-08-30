@@ -74,12 +74,43 @@ def _rows(frame) -> list[dict]:
             "account": row.account_name,
             "description": row.description,
             "amount": float(row.amount),
+            # The account's ownership share, which core hands over on every row.
+            # It's the amount column's footnote while the share toggle is on:
+            # core multiplies the market value and leaves the amount whole, so a
+            # joint row's two numbers stop matching and this says why.
+            "share": float(row.ownership_share),
             "asset": row.asset,
             "market_value": _number(row.market_value),
             "category": row.category,
         }
         for row in frame.itertuples()
     ]
+
+
+def _ordered(rows: list[dict]) -> list[dict]:
+    """The month's rows, by date and then by how big they are.
+
+    Core's order is date then account name; the date stays primary and the rest
+    is replaced by the size of the market value, biggest first. Offsetting
+    transactions are the same size — a fridge bought for 1,000 and the refund
+    that took it back — so they land next to each other instead of a column
+    apart (user, 2026-08-30). The magnitude is never displayed and never added
+    to anything: this is which order to list rows in, not a number about money.
+    An unpriced row has no size, so it sits at the bottom of its date.
+    """
+    return sorted(rows, key=lambda row: (row["date"], -abs(row["market_value"] or 0.0)))
+
+
+def _total(rows: list[dict]) -> float:
+    """The market values of the rows on screen, added up.
+
+    Money arithmetic in this layer, which is normally core's alone — the user's
+    call (2026-08-30), and the reason is the filter: the number has to answer to
+    which rows are being *shown*, and what a UI filter is showing is not
+    something core is in a position to know. Unpriced rows have no value to
+    contribute and sit the sum out.
+    """
+    return sum(row["market_value"] or 0.0 for row in rows)
 
 
 # --- filtering the month's rows ----------------------------------------------
@@ -120,10 +151,14 @@ def _filters(rows: list[dict], cats: Sequence[str], accts: Sequence[str]) -> lis
     ]
 
 
-def _filter_qs(cats: Sequence[str], accts: Sequence[str]) -> str:
-    """The picks as a query string, for every link and form that has to carry
-    them across a page load."""
-    return urlencode([("cat", c) for c in cats] + [("acct", a) for a in accts])
+def _page_qs(cats: Sequence[str], accts: Sequence[str], share: bool = False) -> str:
+    """How the page is being looked at — the filter picks and the ownership
+    share toggle — as a query string, for every link and form that has to carry
+    it across a page load."""
+    pairs = [("cat", c) for c in cats] + [("acct", a) for a in accts]
+    if share:
+        pairs.append(("share", "1"))
+    return urlencode(pairs)
 
 
 def _selected_month(available: list[months.Month], y: int | None, mo: int | None, step: int):
@@ -155,6 +190,7 @@ def _month_page(
     moved: str = "",
     cats: Sequence[str] = (),
     accts: Sequence[str] = (),
+    share: bool = False,
     error: str = "",
     status_code: int = 200,
 ):
@@ -175,6 +211,10 @@ def _month_page(
     instead of the row silently vanishing.
 
     `cats` and `accts` are the filter picks, straight from the query string.
+
+    `share` is the ownership-share toggle: core values a joint account's
+    transaction whole, and this asks it for your fraction of each one instead.
+    Off by default — the whole transaction is what the statement said.
     """
     try:
         with vaults.open_vault(user.id) as vault:
@@ -182,9 +222,13 @@ def _month_page(
             available = months.between(summary["first_transaction"], summary["last_transaction"])
             selected = _selected_month(available, y, mo, step)
             rows = (
-                _rows(
-                    vault.list_transactions(
-                        start_date=selected.first_day, end_date=selected.last_day
+                _ordered(
+                    _rows(
+                        vault.list_transactions(
+                            start_date=selected.first_day,
+                            end_date=selected.last_day,
+                            apply_ownership_share=share,
+                        )
                     )
                 )
                 if selected is not None
@@ -203,9 +247,10 @@ def _month_page(
             years=[],
             rows=[],
             filters=[],
-            filter_qs="",
+            page_qs="",
         )
 
+    shown = [row for row in rows if _keep(row, cats, accts)]
     return page(
         request,
         "month.html",
@@ -216,10 +261,13 @@ def _month_page(
         selected=selected,
         has_older=selected is not None and selected > available[0],
         has_newer=selected is not None and selected < available[-1],
-        rows=[row for row in rows if _keep(row, cats, accts)],
+        rows=shown,
+        total=_total(shown),
         n_total=len(rows),
         filters=_filters(rows, cats, accts),
-        filter_qs=_filter_qs(cats, accts),
+        filtering=bool(cats or accts),
+        page_qs=_page_qs(cats, accts, share),
+        share=share,
         base_asset=base_asset,
         categories=categories,
         edit=edit,
@@ -247,6 +295,7 @@ def month_view(
     edit: int | None = None,
     redate: int | None = None,
     moved: str = "",
+    share: bool = False,
 ):
     return _month_page(
         request,
@@ -260,6 +309,7 @@ def month_view(
         moved=moved,
         cats=cat,
         accts=acct,
+        share=share,
     )
 
 
@@ -269,6 +319,14 @@ def month_view(
 # description; "just this one" is an exception keyed on the whole transaction.
 # Which one runs is which button was pressed — nothing here decides it, and
 # nothing here knows what a category means.
+#
+# Picking "unclassified" is how a decision is *taken back*: core reads a
+# category of None as "remove the rule" / "remove the exception", and
+# "unclassified" is the name it reserves for a transaction no file claims. So
+# the option and the None are the same thing said twice, once to the user and
+# once to core.
+
+UNCLASSIFIED = "unclassified"
 
 
 @router.post("/month/categorize")
@@ -289,6 +347,7 @@ def categorize(
     # it in every row of the table.
     cat: Annotated[list[str], Query(default_factory=list)],
     acct: Annotated[list[str], Query(default_factory=list)],
+    share: bool = False,
     # Defaulted, not required: an empty <select> submits as a *missing* field,
     # and a 422 is the wrong answer to "you didn't pick one".
     category: Annotated[str, Form()] = "",
@@ -296,9 +355,10 @@ def categorize(
 ):
     # The row's id only steers the page: it lands the browser back on the row
     # (#t<id>), and on an error it keeps that row's editor open.
-    qs = _filter_qs(cat, acct)
+    qs = _page_qs(cat, acct, share)
     back = f"/month?y={y}&mo={mo}" + (f"&{qs}" if qs else "") + (f"#t{tid}" if tid else "")
-    if not category.strip():
+    picked = category.strip()
+    if not picked:
         return _month_page(
             request,
             user,
@@ -308,19 +368,23 @@ def categorize(
             edit=tid,
             cats=cat,
             accts=acct,
+            share=share,
             error="Pick a category first.",
             status_code=400,
         )
+    # "unclassified" is the one option that isn't a category — it's the absence
+    # of one, which core spells `None`.
+    wanted = None if picked.lower() == UNCLASSIFIED else picked
     try:
         with vaults.open_vault(user.id) as vault:
             if scope == "all":
-                vault.set_category_rule(description, category)
+                vault.set_category_rule(description, wanted)
             else:
                 # The natural key of one transaction, straight back out of the
                 # row it was rendered from. The asset goes with it: core reads
                 # `assets=None` as the base currency, not "any".
                 vault.set_category_exception(
-                    account, date, description, amount, category, assets=asset
+                    account, date, description, amount, wanted, assets=asset
                 )
     except vaults.VaultMissing:
         return _redirect(back)
@@ -334,6 +398,7 @@ def categorize(
             edit=tid,
             cats=cat,
             accts=acct,
+            share=share,
             error=vaults.explain(exc),
             status_code=400,
         )
@@ -367,6 +432,7 @@ def set_date(
     asset: Annotated[str, Form()],
     cat: Annotated[list[str], Query(default_factory=list)],
     acct: Annotated[list[str], Query(default_factory=list)],
+    share: bool = False,
     # Defaulted for the same reason as `category` in categorize: a control that
     # submits nothing should get an answer, not a 422.
     effective: Annotated[str, Form()] = "",
@@ -383,10 +449,11 @@ def set_date(
             redate=tid,
             cats=cat,
             accts=acct,
+            share=share,
             error="Pick a date first.",
             status_code=400,
         )
-    qs = _filter_qs(cat, acct)
+    qs = _page_qs(cat, acct, share)
     params = f"y={y}&mo={mo}" + (f"&{qs}" if qs else "")
     try:
         with vaults.open_vault(user.id) as vault:
@@ -405,6 +472,7 @@ def set_date(
             redate=tid,
             cats=cat,
             accts=acct,
+            share=share,
             error=vaults.explain(exc),
             status_code=400,
         )

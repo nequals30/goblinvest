@@ -119,7 +119,7 @@ def _cell(text: Any, *, sort: Any = None, num: bool = False) -> dict:
     return {"text": text, "sort": text if sort is None else sort, "num": num}
 
 
-def _plural(n: int, noun: str) -> str:
+def plural(n: int, noun: str) -> str:
     return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
 
 
@@ -180,7 +180,7 @@ def _category_rows(vault: Any) -> list[dict]:
                     _cell(count, num=True),
                 ],
                 "deletable": True,
-                "note": f"{_plural(count, 'transaction')} in it right now.",
+                "note": f"{plural(count, 'transaction')} in it right now.",
             }
         )
     return rows
@@ -269,41 +269,13 @@ def index(
     nav: Nav,
     slug: Slug,
     deleted: str = "",
-    applied: int | None = None,
 ):
-    notice = "" if applied is None else _applied_notice(applied)
-    return _list_page(request, user, nav, KINDS[slug], deleted=deleted, notice=notice)
+    return _list_page(request, user, nav, KINDS[slug], deleted=deleted)
 
 
-def _applied_notice(unmatched: int) -> str:
-    if unmatched:
-        return f"Categories applied. {_plural(unmatched, 'exception row')} matched no transaction."
-    return "Categories applied."
-
-
-@router.post("/categories/apply")
-def apply_categories(request: Request, user: CurrentUser, nav: Nav):
-    """Re-run core's `apply_categories()` over the whole vault.
-
-    The rules and exceptions files are the user's own and can be edited outside
-    this app; this is the button that makes the vault match them again.
-    """
-    kind = KINDS["categories"]
-    try:
-        with vaults.open_vault(user.id) as vault:
-            unmatched = vaults.apply_categories(vault)
-    except vaults.VaultMissing:
-        return _redirect(kind.url)
-    except vaults.CORE_ERRORS as exc:
-        return _list_page(
-            request,
-            user,
-            nav,
-            kind,
-            error=vaults.explain(exc),
-            status_code=status.HTTP_400_BAD_REQUEST,
-        )
-    return _redirect(f"{kind.url}?applied={unmatched}")
+# Re-applying the adjustments files is not one of these pages' business: there
+# are effective dates in them as well as categories, so the button that runs
+# them all lives on the settings menu (`routes/settings.py`, 2026-08-30).
 
 
 @router.post("/{slug}/add")

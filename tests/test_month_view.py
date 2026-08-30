@@ -187,7 +187,170 @@ def test_the_month_table_is_not_paginated(with_transactions):
 
 
 def test_the_scope_buttons_have_no_paragraph_explaining_them(with_transactions):
-    assert "categorizes every transaction" not in with_transactions.get("/month").text
+    """A title= on each button is the whole explanation the page gets — the
+    prose under the table was deleted 2026-08-27."""
+    html = with_transactions.get("/month").text
+    assert 'title="Apply to every transaction' in html
+    assert ">Apply to every transaction" not in html  # never as text on the page
+
+
+# --- the order rows come in --------------------------------------------------
+
+
+@pytest.fixture
+def one_day(signed_up):
+    """Three transactions on one date, two of them offsetting."""
+    with vaults.open_vault(1) as v:
+        v.add_account("checking")
+        v.add_transactions(
+            "checking",
+            ["2026-05-11", "2026-05-11", "2026-05-11"],
+            ["Restaurant", "Fridge", "Fridge refunded"],
+            [-50.00, -1000.00, 1000.00],
+        )
+    return signed_up
+
+
+def descriptions(html):
+    return [re.search(r'class="desc">([^<]*)<', row).group(1) for row in body_rows(html)]
+
+
+def test_offsetting_transactions_land_next_to_each_other(one_day):
+    """Within a date, biggest market value first, sign ignored — so a charge and
+    the refund that took it back are neighbours (user, 2026-08-30)."""
+    shown = descriptions(one_day.get("/month?y=2026&mo=5").text)
+    assert shown[:2] == ["Fridge", "Fridge refunded"]
+    assert shown[2] == "Restaurant"
+
+
+def test_the_date_is_still_the_primary_sort(with_transactions):
+    html = with_transactions.get("/month?y=2026&mo=5").text
+    dates = [re.search(r'data-sort="(\d{4}-\d\d-\d\d)"', row).group(1) for row in body_rows(html)]
+    assert dates == sorted(dates)
+    # 2,000 on the 20th still comes after 82.50 on the 2nd: size is the tiebreak.
+    assert dates[-1] == "2026-05-20"
+
+
+def test_an_unpriced_row_sorts_to_the_bottom_of_its_date(with_transactions):
+    """VFIAX has no stored price, so there is no size to compare it on."""
+    with vaults.open_vault(1) as v:
+        v.add_transactions("checking", ["2026-05-17"], ["Small"], [-1.00])
+    shown = descriptions(with_transactions.get("/month?y=2026&mo=5").text)
+    assert shown.index("Buy VFIAX") > shown.index("Small")
+
+
+# --- the total ---------------------------------------------------------------
+
+
+def total_cell(html):
+    foot = html.split("<tfoot>")[1].split("</tfoot>")[0]
+    return re.search(r'class="num mv[^"]*">([^<]*)<', foot).group(1)
+
+
+def test_the_table_ends_in_a_total(with_transactions):
+    html = with_transactions.get("/month?y=2026&mo=5").text
+    assert ">Total<" in html
+    assert total_cell(html) == "-2,082.50"  # the unpriced VFIAX row adds nothing
+
+
+def test_the_total_follows_the_filter(with_transactions):
+    """It's summed here rather than in core precisely because it has to answer
+    to a filter, which is this layer's state (user, 2026-08-30)."""
+    html = with_transactions.get("/month?y=2026&mo=5&acct=checking&cat=unclassified").text
+    assert total_cell(html) == "-2,082.50"
+    with vaults.open_vault(1) as v:
+        v.add_account("savings")
+        v.add_transactions("savings", ["2026-05-04"], ["Interest"], [1.25])
+    assert total_cell(with_transactions.get("/month?y=2026&mo=5&acct=savings").text) == "1.25"
+
+
+def test_the_total_is_outside_the_sortable_body(with_transactions):
+    """app.js reorders and pages the <tbody> only, so the total can't be sorted
+    into the middle of the table or hidden by a pager."""
+    html = with_transactions.get("/month?y=2026&mo=5").text
+    assert "Total" not in html.split("<tbody>")[1].split("</tbody>")[0]
+    assert html.index("</tbody>") < html.index("<tfoot>")
+
+
+def test_an_empty_month_has_no_total_row(with_transactions):
+    assert "<tfoot>" not in with_transactions.get("/month?y=2026&mo=4").text
+
+
+# --- ownership share ---------------------------------------------------------
+
+
+@pytest.fixture
+def joint(signed_up):
+    """A half-owned account, which is what the toggle is for."""
+    with vaults.open_vault(1) as v:
+        v.add_account("joint", ownership_share=0.5)
+        v.add_transactions("joint", ["2026-05-06"], ["Mortgage"], [-1000.00])
+    return signed_up
+
+
+def test_the_whole_transaction_is_the_default(joint):
+    html = joint.get("/month?y=2026&mo=5").text
+    assert total_cell(html) == "-1,000.00"
+    assert "checked" not in html.split('id="f-share"')[1].split("/>")[0]
+
+
+def test_the_toggle_values_each_row_at_the_users_share(joint):
+    html = joint.get("/month?y=2026&mo=5&share=1").text
+    assert "-500.00" in html and total_cell(html) == "-500.00"
+    assert "checked" in html.split('id="f-share"')[1].split("/>")[0]
+
+
+def test_the_amount_stays_whole_and_says_what_it_is_multiplied_by(joint):
+    """Core multiplies the market value only, which is right — the amount is
+    what the statement said. So the amount carries the factor (user)."""
+    html = joint.get("/month?y=2026&mo=5&share=1").text
+    amount = re.search(r'class="num amt"[^>]*>(.*?)</td>', html, re.DOTALL).group(1)
+    assert "-1,000.00" in amount  # not halved
+    assert "(&times; 0.5)" in amount  # 0.5, not 0.50
+
+
+def test_a_wholly_owned_row_says_nothing_about_its_share(with_transactions):
+    for url in ("/month?y=2026&mo=5", "/month?y=2026&mo=5&share=1"):
+        assert "&times;" not in with_transactions.get(url).text
+
+
+def test_the_factor_is_only_shown_while_the_share_is_applied(joint):
+    assert "&times;" not in joint.get("/month?y=2026&mo=5").text
+
+
+def test_the_toggle_is_a_get_form_that_works_without_javascript(joint):
+    html = joint.get("/month?y=2026&mo=5").text
+    assert '<input type="checkbox" id="f-share" name="share"' in html
+    assert 'class="go" data-nojs>filter' in html  # the button that submits it
+
+
+def test_the_share_toggle_survives_stepping_to_another_month(joint):
+    html = joint.get("/month?y=2026&mo=5&share=1").text
+    assert '<input type="hidden" name="share" value="1" />' in picker(html)
+
+
+def test_the_share_toggle_rides_on_the_row_forms(joint):
+    """A categorize is a POST → 303 → GET; the toggle has to come back with it."""
+    html = joint.get("/month?y=2026&mo=5&share=1").text
+    assert 'action="/month/categorize?share=1"' in html
+    with vaults.open_vault(1) as v:
+        tid = int(v.list_transactions()["transaction_id"].iloc[0])
+    open_date = joint.get(f"/month?y=2026&mo=5&share=1&redate={tid}").text
+    assert 'action="/month/set-date?share=1"' in open_date
+    assert f"share=1&amp;redate={tid}" in html  # and on the link that opens it
+
+
+def test_clearing_the_filter_keeps_the_share_toggle(joint):
+    """They're both page state, but "clear" is the filter's control, not its."""
+    html = joint.get("/month?y=2026&mo=5&share=1&acct=joint").text
+    clear = re.search(r'class="clear" href="([^"]*)"', html).group(1)
+    assert "share=1" in clear and "acct=" not in clear
+
+
+def test_clear_sits_with_the_dropdowns_and_not_after_the_toggle(joint):
+    """To the right of the toggle it reads as clearing the toggle (user)."""
+    html = joint.get("/month?y=2026&mo=5&share=1&acct=joint").text
+    assert html.index('class="clear"') < html.index('id="f-share"')
 
 
 # --- filtering ---------------------------------------------------------------

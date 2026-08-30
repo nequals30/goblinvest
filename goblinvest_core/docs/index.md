@@ -79,8 +79,12 @@ statement gave it. They differ only for transactions you have moved — see
 `market_value` is the amount times that price, both in the base currency. The
 base currency itself is priced at 1.0, and an asset with no stored price by that
 date gives `NaN` for both — see [Market prices](#market-prices). The market
-value covers the whole transaction, not your share of a joint account; multiply
-by `ownership_share` for that.
+value covers the whole transaction, not your share of a joint account. Pass
+`apply_ownership_share=True` for your share instead:
+
+```python
+v.list_transactions(apply_ownership_share=True)
+```
 
 Deleting an account or an asset deletes its transactions too, so both ask you to
 confirm at the terminal first and do nothing unless you answer `y`:
@@ -216,12 +220,21 @@ v.set_category_rule(["Trader Joe's", "SAFEWAY #1042"], "groceries")   # or a bat
 ```
 
 Rules nearer the bottom of the file win, so reclassifying something is another
-call. To categorize a single transaction whatever the rules say, use
+call. A category of `None` removes the rules for that description instead,
+leaving its transactions unclassified again:
+
+```python
+v.set_category_rule("Netflix", None)
+```
+
+To categorize a single transaction whatever the rules say, use
 `set_category_exception`. It takes the same parallel lists as
-`add_transactions`, and a category of `None` removes the exception again:
+`add_transactions`, and a category of `None` removes the exception again, so the
+transaction goes back to following the rules:
 
 ```python
 v.set_category_exception("checking", "2026-02-14", "CHECK # 1145", -500.00, "gifts")
+v.set_category_exception("checking", "2026-02-14", "CHECK # 1145", -500.00, None)
 ```
 
 `list_uncategorized()` is the to-do list: everything still unclassified, grouped

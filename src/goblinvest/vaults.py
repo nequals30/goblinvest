@@ -39,7 +39,7 @@ def explain(exc: Exception) -> str:
     """A core exception as a line to put in front of the user. Core's own
     ValueError messages already name what was wrong, so they pass through."""
     if isinstance(exc, FileNotFoundError):
-        return "This vault's adjustments folder is missing, so category changes can't be saved."
+        return "This vault's adjustments folder is missing, so changes to it can't be saved."
     return str(exc)
 
 
@@ -85,6 +85,22 @@ def apply_categories(vault: Any) -> int:
     leaving this module.
     """
     return len(vault.apply_categories())
+
+
+def apply_adjustments(vault: Any) -> tuple[int, int]:
+    """Re-run every adjustments file over the vault: dates, then categories.
+
+    The files are the user's own and can be edited outside this app; this is
+    what makes the vault match them again. Both core calls hand back the rows
+    that named no transaction — a typo, or a description the bank reworded —
+    and both counts come back so the page can say so. Dates go first because
+    that is the order a rebuild does it in, not because either depends on the
+    other: categories are keyed on the date the statement gave a transaction,
+    which moving it does not change.
+    """
+    undated = len(vault.apply_effective_dates())
+    uncategorized = len(vault.apply_categories())
+    return uncategorized, undated
 
 
 def define_category(vault: Any, name: str) -> None:

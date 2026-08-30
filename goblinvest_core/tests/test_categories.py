@@ -628,6 +628,74 @@ class TestSetCategoryRule:
             vault.set_category_rule(["Netflix", "Steam"], ["streaming", "unclassified"])
         assert _rules_file(adjustments).read_text() == before
 
+    def test_none_removes_the_rule_and_uncategorizes(self, vault, adjustments):
+        vault.set_category_rule("Netflix", "streaming")
+        vault.set_category_rule("Netflix", None)
+        assert _rules_file(adjustments).read_text() == "pattern,category\n"
+        assert _categories_of(vault)["Netflix"] == UNCLASSIFIED
+
+    def test_none_removes_every_rule_for_that_description(self, vault, adjustments):
+        # Reclassifying appends rather than rewrites, so a description can own
+        # several lines; removing must not just promote the older one.
+        _write_rules(adjustments, ("Netflix", "movies"), ("netflix", "streaming"))
+        vault.set_category_rule("Netflix (2)", None)
+        assert _rules_file(adjustments).read_text() == "pattern,category\n"
+        assert _categories_of(vault)["Netflix"] == UNCLASSIFIED
+
+    def test_none_leaves_other_descriptions_alone(self, vault, adjustments):
+        _write_rules(adjustments, ("Netflix", "streaming"), ("Steam", "games"))
+        vault.set_category_rule("Netflix", None)
+        assert _rules_file(adjustments).read_text() == "pattern,category\nSteam,games\n"
+        assert _categories_of(vault)["Steam"] == "games"
+
+    def test_none_falls_back_to_an_exception(self, vault, adjustments):
+        # Exceptions are the other layer; dropping a rule doesn't touch them.
+        vault.set_category_rule("Netflix", "streaming")
+        vault.set_category_exception("checking", "2026-01-05", "Netflix (2)", -15.99, "fun")
+        vault.set_category_rule("Netflix", None)
+        assert _categories_of(vault)["Netflix"] == UNCLASSIFIED
+        assert _categories_of(vault)["Netflix (2)"] == "fun"
+
+    def test_none_for_an_unruled_description_is_a_no_op(self, vault, adjustments):
+        before = _rules_file(adjustments).read_text()
+        vault.set_category_rule("Netflix", None)
+        assert _rules_file(adjustments).read_text() == before
+
+    def test_a_batch_may_mix_names_and_none(self, vault, adjustments):
+        _write_rules(adjustments, ("Netflix", "streaming"), ("Steam", "games"))
+        vault.set_category_rule(["Netflix", "Steam", "ACME Payroll"], [None, "fun", "income"])
+        cats = _categories_of(vault)
+        assert cats["Netflix"] == UNCLASSIFIED
+        assert cats["Steam"] == "fun"
+        assert cats["ACME Payroll"] == "income"
+
+    def test_none_broadcasts_across_descriptions(self, vault, adjustments):
+        _write_rules(adjustments, ("Netflix", "streaming"), ("Steam", "games"))
+        vault.set_category_rule(["Netflix", "Steam"], None)
+        assert _rules_file(adjustments).read_text() == "pattern,category\n"
+
+    def test_set_then_removed_in_one_call_keeps_the_last(self, vault, adjustments):
+        vault.set_category_rule(["Netflix", "Netflix"], ["streaming", None])
+        assert _rules_file(adjustments).read_text() == "pattern,category\n"
+        assert _categories_of(vault)["Netflix"] == UNCLASSIFIED
+
+    def test_removed_then_set_in_one_call_keeps_the_last(self, vault, adjustments):
+        # The removal is discarded, so this is an ordinary reclassify: the old
+        # line stays and the new one wins by being later.
+        _write_rules(adjustments, ("Netflix", "movies"))
+        vault.set_category_rule(["Netflix", "Netflix"], [None, "streaming"])
+        assert _rules_file(adjustments).read_text() == (
+            "pattern,category\nNetflix,movies\nNetflix,streaming\n"
+        )
+        assert _categories_of(vault)["Netflix"] == "streaming"
+
+    def test_removal_beside_a_bad_row_writes_nothing(self, vault, adjustments):
+        _write_rules(adjustments, ("Netflix", "streaming"))
+        before = _rules_file(adjustments).read_text()
+        with pytest.raises(ValueError, match="not defined"):
+            vault.set_category_rule(["Netflix", "Steam"], [None, "nonesuch"])
+        assert _rules_file(adjustments).read_text() == before
+
 
 class TestSetCategoryException:
     def test_sets_one_transaction_only(self, vault, adjustments):

@@ -9,7 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, Form, Request, status
 from fastapi.responses import RedirectResponse
 
-from goblinvest import auth, db
+from goblinvest import auth, db, vaults
 from goblinvest import nav as navmod
 from goblinvest.auth import Conn, CurrentUser
 from goblinvest.nav import Nav
@@ -19,6 +19,7 @@ from goblinvest.templates import page
 
 router = APIRouter(prefix="/settings")
 
+INDEX_URL = "/settings"
 NAV_URL = "/settings/nav"
 ACCOUNT_URL = "/settings/account"
 
@@ -27,9 +28,70 @@ def _redirect(to: str) -> RedirectResponse:
     return RedirectResponse(to, status_code=status.HTTP_303_SEE_OTHER)
 
 
+def _index_page(request: Request, user, nav, *, notice: str = "", error: str = "", status_code=200):
+    return page(
+        request,
+        "settings.html",
+        user,
+        nav,
+        kinds=list(vault_settings.KINDS.values()),
+        notice=notice,
+        error=error,
+        status_code=status_code,
+    )
+
+
 @router.get("")
-def index(request: Request, user: CurrentUser, nav: Nav):
-    return page(request, "settings.html", user, nav, kinds=list(vault_settings.KINDS.values()))
+def index(
+    request: Request,
+    user: CurrentUser,
+    nav: Nav,
+    applied: bool = False,
+    cats: int = 0,
+    dates: int = 0,
+):
+    notice = _applied_notice(cats, dates) if applied else ""
+    return _index_page(request, user, nav, notice=notice)
+
+
+# --- the adjustments files ---------------------------------------------------
+#
+# Categories and effective dates are both recorded in files that are the user's
+# own and get edited outside this app; this is the button that makes the vault
+# match them again. It sits here rather than on the categories page because it
+# is no longer only about categories (user, 2026-08-30).
+
+
+def _applied_notice(cats: int, dates: int) -> str:
+    """Core hands back the file rows that named no transaction — a typo, or a
+    description the bank reworded. Saying nothing about them would be the
+    silent failure core went out of its way to avoid."""
+    unmatched = [
+        vault_settings.plural(count, noun)
+        for count, noun in ((cats, "exception row"), (dates, "date row"))
+        if count
+    ]
+    if not unmatched:
+        return "Adjustments applied."
+    return f"Adjustments applied. {' and '.join(unmatched)} matched no transaction."
+
+
+@router.post("/adjustments/apply")
+def apply_adjustments(request: Request, user: CurrentUser, nav: Nav):
+    try:
+        with vaults.open_vault(user.id) as vault:
+            cats, dates = vaults.apply_adjustments(vault)
+    except vaults.VaultMissing:
+        return _redirect(INDEX_URL)
+    except vaults.CORE_ERRORS as exc:
+        return _index_page(
+            request,
+            user,
+            nav,
+            error=vaults.explain(exc),
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    return _redirect(f"{INDEX_URL}?applied=1&cats={cats}&dates={dates}")
 
 
 # --- account ----------------------------------------------------------------

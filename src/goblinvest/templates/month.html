@@ -10,10 +10,12 @@
      step relative to it. Works with JavaScript off; the selects just need the
      fallback "go" button then. #}
   <form class="picker" method="get" action="/month">
-    {# The filter is page state, so stepping to another month keeps it. #}
+    {# The filter and the share toggle are page state, so stepping to another
+       month keeps them. #}
     {% for filter in filters %}{% for value in filter.picked %}
     <input type="hidden" name="{{ filter.name }}" value="{{ value }}" />
     {% endfor %}{% endfor %}
+    {% if share %}<input type="hidden" name="share" value="1" />{% endif %}
 
     <button type="submit" name="step" value="-1" class="step"
             title="previous month" {% if not has_older %}disabled{% endif %}>‹</button>
@@ -59,10 +61,11 @@
 <p class="muted">No transactions yet. Import some statements and they'll show up here.</p>
 {% else %}
 
-{# This month with its filter still on — every link out of the table and back. #}
-{% set month_url = "/month?y=" ~ selected.year ~ "&mo=" ~ selected.month ~ ("&" ~ filter_qs if filter_qs else "") %}
+{# This month as it is being looked at — the filter and the share toggle — for
+   every link out of the table and back. #}
+{% set month_url = "/month?y=" ~ selected.year ~ "&mo=" ~ selected.month ~ ("&" ~ page_qs if page_qs else "") %}
 
-{% if n_total or filter_qs %}
+{% if n_total or filtering %}
 {# Native multi-selects, upgraded by app.js into checkbox dropdowns. With no
    JavaScript they stay as they are and the "filter" button submits them. #}
 <form class="filters" method="get" action="/month">
@@ -78,9 +81,19 @@
   </select>
   {% endfor %}
   <button type="submit" class="go" data-nojs>filter</button>
-  {% if filter_qs %}
-  <a class="clear" href="/month?y={{ selected.year }}&amp;mo={{ selected.month }}">clear</a>
+  {# "clear" belongs to the dropdowns, so it stays next to them — to the right
+     of the share toggle it read as clearing that instead (user, 2026-08-30). #}
+  {% if filtering %}
+  <a class="clear" href="/month?y={{ selected.year }}&amp;mo={{ selected.month }}{% if share %}&amp;share=1{% endif %}">clear</a>
   {% endif %}
+  {# Core values a joint account's transaction whole; ticked, it reports the
+     user's fraction of each one instead. Same form, so it submits with the
+     filter — and on its own, via data-autosubmit, when it's the only change. #}
+  <label class="toggle" title="Value each row at your share of its account">
+    <input type="checkbox" id="f-share" name="share" value="1" data-autosubmit
+           {% if share %}checked{% endif %} />
+    apply my ownership share
+  </label>
 </form>
 {% endif %}
 
@@ -122,7 +135,7 @@
              >{{ row.date.strftime("%-m/%-d") }}</a>
           {% else %}
           {# The filter rides on the action URL, as it does for categorize. #}
-          <form method="post" action="/month/set-date{% if filter_qs %}?{{ filter_qs }}{% endif %}" class="date-form">
+          <form method="post" action="/month/set-date{% if page_qs %}?{{ page_qs }}{% endif %}" class="date-form">
             {{ csrf_input }}
             <input type="hidden" name="y" value="{{ selected.year }}" />
             <input type="hidden" name="mo" value="{{ selected.month }}" />
@@ -151,8 +164,14 @@
         <td class="desc">{{ row.description }}</td>
         {# The amount is in the row's own asset; the market value is what it is
            worth in the base currency, so that's the column that carries the
-           weight — and the one the eye should land on. #}
-        <td class="num amt" data-sort="{{ row.amount }}">{{ "{:,.2f}".format(row.amount) }}</td>
+           weight — and the one the eye should land on.
+
+           The amount is the whole transaction even while ownership share is
+           applied — core multiplies the market value and leaves this alone, and
+           that's right: this is what the statement said. So on a row where the
+           two now differ, the amount says by how much (user, 2026-08-30). A
+           wholly-owned account has nothing to say, so it doesn't. #}
+        <td class="num amt" data-sort="{{ row.amount }}">{{ "{:,.2f}".format(row.amount) }}{% if share and row.share != 1 %} <span class="share">(&times; {{ "{:g}".format(row.share) }})</span>{% endif %}</td>
         <td>{% if row.asset != base_asset %}{{ row.asset }}{% endif %}</td>
         {% if row.market_value is none %}
         {# Core prices a row at its own date; no stored price by then, no value. #}
@@ -175,7 +194,7 @@
              ><span class="sr-only">change category</span>✎</a>
           {% else %}
           {# The filter rides on the action URL, not in a hidden field per row. #}
-          <form method="post" action="/month/categorize{% if filter_qs %}?{{ filter_qs }}{% endif %}" class="cat-form">
+          <form method="post" action="/month/categorize{% if page_qs %}?{{ page_qs }}{% endif %}" class="cat-form">
             {{ csrf_input }}
             <input type="hidden" name="y" value="{{ selected.year }}" />
             <input type="hidden" name="mo" value="{{ selected.month }}" />
@@ -189,28 +208,51 @@
             <input type="hidden" name="asset" value="{{ row.asset }}" />
             <label class="sr-only" for="cat-{{ row.id }}">category</label>
             <select id="cat-{{ row.id }}" name="category" class="{% if unset %}unset{% endif %}">
-              {% if unset %}<option value="" selected>unclassified</option>{% endif %}
+              {# Not a category — the absence of one. Picking it and pressing a
+                 scope button takes the decision back: the route sends core a
+                 category of None, which removes the rule or the exception. #}
+              <option value="unclassified"{% if unset %} selected{% endif %}>unclassified</option>
               {% for name in categories %}
               <option value="{{ name }}" {% if name == row.category %}selected{% endif %}>
                 {{ name }}
               </option>
               {% endfor %}
             </select>
+            {# "Apply", not "categorize": the pick may be "unclassified", which
+               takes a decision back rather than making one. #}
             <button type="submit" name="scope" value="all" {% if not categories %}disabled{% endif %}
-                    title="Categorize every transaction described “{{ row.description }}”">all</button>
+                    title="Apply to every transaction described “{{ row.description }}”">all</button>
             <button type="submit" name="scope" value="one" {% if not categories %}disabled{% endif %}
-                    title="Categorize only this transaction">this</button>
+                    title="Apply to this transaction only">this</button>
           </form>
           {% endif %}
         </td>
       </tr>
       {% endfor %}
     </tbody>
+    {% if rows %}
+    {# The rows on screen, added up — so it answers to the filter and to the
+       share toggle above it. In <tfoot>, which app.js never touches: it sorts
+       and pages the <tbody> only, so the total can't be sorted into the middle
+       of the table or hidden by a pager. Rows with no market value contribute
+       nothing to it — they show a dash above. #}
+    <tfoot>
+      <tr class="total">
+        <td class="c-date"></td>
+        <td>Total</td>
+        <td class="desc"></td>
+        <td class="num"></td>
+        <td></td>
+        <td class="num mv {% if total < 0 %}neg{% endif %}">{{ "{:,.2f}".format(total) }}</td>
+        <td></td>
+      </tr>
+    </tfoot>
+    {% endif %}
   </table>
 
   {% if not rows %}
   <p class="muted">
-    {% if filter_qs %}No transactions match.{% else %}No transactions in {{ selected.label }}.{% endif %}
+    {% if filtering %}No transactions match.{% else %}No transactions in {{ selected.label }}.{% endif %}
   </p>
   {% endif %}
   <p class="hint">

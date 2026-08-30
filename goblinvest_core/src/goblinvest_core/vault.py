@@ -855,6 +855,7 @@ class Vault:
         *,
         start_date: datetime.date | str | None = None,
         end_date: datetime.date | str | None = None,
+        apply_ownership_share: bool = False,
     ) -> pd.DataFrame:
         """Return the ledger, with account and asset details joined in and each
         transaction valued at its own date's price.
@@ -870,6 +871,9 @@ class Vault:
                 falls in the range it was moved to.
             end_date: Latest date to include, same formats. Included in the
                 result.
+            apply_ownership_share: Multiply ``market_value`` by the account's
+                ``ownership_share``, so a joint account reports your share of
+                each transaction rather than the whole of it.
 
         Returns:
             A pandas ``DataFrame`` with one row per transaction, sorted by
@@ -888,8 +892,8 @@ class Vault:
             - ``ownership_share`` — your fraction of the account
             - ``account_group_name`` — the account's group label
 
-            ``market_value`` is the whole transaction, not your share of it:
-            multiply by ``ownership_share`` for that.
+            ``market_value`` is the whole transaction, not your share of it,
+            unless ``apply_ownership_share`` is ``True``.
 
         Examples:
             ```python
@@ -907,9 +911,12 @@ class Vault:
         """
         df = self._ledger(start_date=start_date, end_date=end_date)
         df["price"] = self._prices_per_row(df)
+        value = df["amount"] * df["price"]
+        if apply_ownership_share:
+            value *= df["ownership_share"]
         # astype keeps the column float on an empty ledger, where the amounts
         # come back from SQLite as an object column.
-        df["market_value"] = (df["amount"] * df["price"]).astype(float).round(2)
+        df["market_value"] = value.astype(float).round(2)
         return df[
             [
                 "transaction_id",
@@ -1246,7 +1253,7 @@ class Vault:
     def set_category_rule(
         self,
         descriptions: str | Sequence[str],
-        categories: str | Sequence[str],
+        categories: str | None | Sequence[str | None],
     ) -> None:
         """Categorize every transaction with a given description.
 
@@ -1271,10 +1278,14 @@ class Vault:
                 as `list_transactions` shows them. A same-day duplicate suffix
                 like ``" (2)"`` is stripped for you.
             categories: Category name for each description, or a single one
-                for all of them. Each must already be defined with
-                [`add_category`][goblinvest_core.Vault.add_category]
+                for all of them, or ``None`` to remove the rules for that
+                description (its transactions fall back to whatever else
+                covers them on the re-apply, which is usually nothing, leaving
+                them ``"unclassified"``). A list may mix names and ``None`` to
+                set some and clear others. Each name must already be defined
+                with [`add_category`][goblinvest_core.Vault.add_category]
                 (capitalization ignored). Naming the same description twice in
-                one call keeps the last category given.
+                one call keeps the last decision given.
 
         Returns:
             Nothing.
@@ -1295,40 +1306,54 @@ class Vault:
 
             # or clear the whole to-do list in one go
             v.set_category_rule(v.list_uncategorized()["description"], "misc")
+
+            # back to uncategorized: the rules for that description are removed
+            v.set_category_rule("Netflix", None)
             ```
         """
         columns = _broadcast({"descriptions": descriptions, "categories": categories})
-        new = pd.DataFrame(
-            {
-                "pattern": pd.Series(columns["descriptions"], dtype=str),
-                "category": pd.Series(columns["categories"], dtype=str),
-            }
-        )
-        new["category"] = new["category"].str.strip()
-        if (new["category"] == "").any():
-            raise ValueError("category cannot be empty")
-        reserved = new["category"].str.lower() == UNCLASSIFIED
-        if reserved.any():
+
+        category = pd.Series(columns["categories"], dtype=object)
+        given = category.notna()
+        category = category.where(~given, category[given].astype(str).str.strip())
+        if (category[given] == "").any():
+            raise ValueError("category cannot be empty (pass None to remove a rule)")
+        if (category[given].str.lower() == UNCLASSIFIED).any():
             raise ValueError(f'"{UNCLASSIFIED}" is reserved: it means no category')
-        new["pattern"] = _strip_dup_suffix(new["pattern"].str.strip()).str.strip()
-        if (new["pattern"] == "").any():
+        pattern = pd.Series(columns["descriptions"], dtype=str).str.strip()
+        pattern = _strip_dup_suffix(pattern).str.strip()
+        if (pattern == "").any():
             raise ValueError("description cannot be empty")
 
         # An undefined category is refused before the file is touched.
         adjustments_dir = self._adjustments()
         defined, _ = _read_category_file(adjustments_dir, _CATEGORIES_FILE, "categories")
-        new["category"] = _resolve_categories(new["category"], _canonical_categories(defined))
+        category = _resolve_categories(category, _canonical_categories(defined))
+
+        new = pd.DataFrame({"pattern": pattern, "category": category})
+        key = _normalize_desc(new["pattern"])
+        # One decision per description (the last one given).
+        new = new[~key.duplicated(keep="last")]
+        key = key[new.index]
 
         rules, _ = _read_category_file(adjustments_dir, _RULES_FILE, "category rules")
+        # A removal takes every rule for that description, not just the one
+        # that was in force: the file may hold several, and leaving the earlier
+        # ones would just promote one of them.
+        removals = key[new["category"].isna()]
+        dropped = _normalize_desc(rules["pattern"].fillna("")).isin(removals)
+        rules = rules[~dropped]
+
+        # Of what's left to set, only the decisions the file doesn't already make.
         rule_of = dict(
             zip(_normalize_desc(rules["pattern"].fillna("")), rules["category"].str.lower())
         )
-        # One decision per description (the last one given), and only the ones
-        # the file doesn't already make.
-        key = _normalize_desc(new["pattern"])
-        new = new[~key.duplicated(keep="last") & (key.map(rule_of) != new["category"].str.lower())]
-        if not new.empty:
-            _write_file(adjustments_dir, _RULES_FILE, pd.concat([rules, new], ignore_index=True))
+        keep = new[new["category"].notna()]
+        keep = keep[key[keep.index].map(rule_of) != keep["category"].str.lower()]
+        if not keep.empty:
+            rules = pd.concat([rules, keep], ignore_index=True)
+        if dropped.any() or not keep.empty:
+            _write_file(adjustments_dir, _RULES_FILE, rules)
         self.apply_categories()
 
     def set_category_exception(

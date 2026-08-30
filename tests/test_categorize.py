@@ -99,7 +99,7 @@ def test_the_dropdown_offers_every_defined_category(ledger):
 
 def test_an_uncategorized_row_starts_unset(ledger):
     options = cell(ledger.get(MONTH).text, "Rent")
-    assert '<option value="" selected>unclassified</option>' in options
+    assert '<option value="unclassified" selected>unclassified</option>' in options
     assert 'class="unset"' in options
 
 
@@ -123,7 +123,8 @@ def test_the_pencil_opens_the_editor_for_that_row_only(ledger):
     editing = cell(html, "Rent")
     assert "<select" in editing
     assert '<option value="rent" selected>' in editing  # its category, preselected
-    assert "unclassified" not in editing  # no placeholder once it has one
+    # "unclassified" is offered but not chosen: it's how the category comes off.
+    assert '<option value="unclassified">' in editing
     assert f'name="tid" value="{tid}"' in editing
     assert "<select" not in cell(html, "Buy VFIAX")  # the other settled row is untouched
 
@@ -258,6 +259,54 @@ def test_a_category_can_be_changed(ledger):
     assert categories()["Rent"] == "groceries"
     post(ledger, "Rent", "rent", "all")
     assert categories()["Rent"] == "rent"
+
+
+# --- taking a category back off ----------------------------------------------
+#
+# Same control, same two buttons: "unclassified" is the option that isn't a
+# category, and the route turns it into the None core reads as "remove the rule"
+# or "remove the exception".
+
+
+def test_the_dropdown_always_offers_unclassified(ledger):
+    post(ledger, "Rent", "rent", "one")
+    tid = transaction_id("Rent")
+    assert '<option value="unclassified">' in cell(ledger.get(f"{MONTH}&edit={tid}").text, "Rent")
+
+
+def test_unclassifying_all_removes_the_rule(ledger):
+    post(ledger, "Whole Foods", "groceries", "all")
+    assert categories()["Whole Foods"] == "groceries"
+
+    r = post(ledger, "Whole Foods", "unclassified", "all")
+    assert r.status_code == 200
+    # Both look-alikes, the way the rule reached both of them.
+    assert set(amounts_to_categories().values()) == {"unclassified"}
+
+
+def test_unclassifying_this_removes_only_that_rows_exception(ledger):
+    post(ledger, "Whole Foods", "groceries", "all")  # the rule covers both
+    post(ledger, "Whole Foods", "rent", "one")  # and this one is pinned
+    assert amounts_to_categories()[-82.50] == "rent"
+
+    post(ledger, "Whole Foods", "unclassified", "one")
+    by_amount = amounts_to_categories()
+    assert by_amount[-82.50] == "groceries"  # back to following the rule
+    assert by_amount[-31.00] == "groceries"  # its look-alike never moved
+
+
+def test_unclassifying_a_row_that_is_pinned_by_an_exception_only(ledger):
+    post(ledger, "Buy VFIAX", "groceries", "one")
+    post(ledger, "Buy VFIAX", "unclassified", "one")
+    assert categories()["Buy VFIAX"] == "unclassified"
+
+
+def test_the_reserved_name_never_reaches_core_as_a_category(ledger):
+    """Core refuses "unclassified" as a category name — the route has to have
+    turned it into None before it gets there, not passed it along."""
+    r = post(ledger, "Rent", "UNCLASSIFIED", "all")
+    assert r.status_code == 200 and "reserved" not in r.text
+    assert categories()["Rent"] == "unclassified"
 
 
 # --- the round trip ----------------------------------------------------------
