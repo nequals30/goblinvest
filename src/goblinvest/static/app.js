@@ -230,8 +230,9 @@
  * page keeps the native multi-select and its data-nojs submit button, and the
  * server sees the same request either way.
  *
- * Nothing ticked means no filter. "All" and "none" are the same request, which
- * is why there is a "clear" and no "select all".
+ * Nothing ticked means no filter, and so does everything ticked — they are the
+ * same request. "all" and "none" are still both offered, because "all" is how
+ * you say "everything except this one" without ticking fourteen boxes.
  */
 (function () {
   "use strict";
@@ -287,12 +288,26 @@
 
     function relabel() {
       var chosen = picked(select);
+      var every = chosen.length === select.options.length;
+      // Everything ticked excludes nothing, so it reads as "all" — same as
+      // nothing ticked, which is the request it makes.
       var summary = "all";
-      if (chosen.length === 1) summary = chosen[0].value;
-      else if (chosen.length > 1) summary = chosen.length + " picked";
+      if (!every) {
+        if (chosen.length === 1) summary = chosen[0].value;
+        else if (chosen.length > 1) summary = chosen.length + " picked";
+      }
       button.textContent = select.dataset.combo + ": " + summary;
-      combo.classList.toggle("is-filtered", chosen.length > 0);
-      clear.disabled = chosen.length === 0;
+      combo.classList.toggle("is-filtered", chosen.length > 0 && !every);
+      all.disabled = every;
+      none.disabled = chosen.length === 0;
+    }
+
+    function setAll(checked) {
+      boxes.forEach(function (box, i) {
+        box.checked = checked;
+        select.options[i].selected = checked;
+      });
+      apply();
     }
 
     // The label answers immediately; the page catches up once the ticking
@@ -320,19 +335,30 @@
       boxes.push(box);
     });
 
+    // "all" ticks every box, which excludes nothing — the same view as none
+    // ticked. It's there as a *starting point*: tick everything, then untick
+    // the one you don't want, rather than ticking fourteen of fifteen by hand
+    // (user, 2026-08-28). The settle window means those two clicks are still
+    // one page load if they come quickly.
     var tools = document.createElement("div");
     tools.className = "combo-tools";
-    var clear = document.createElement("button");
-    clear.type = "button";
-    clear.textContent = "clear";
-    clear.addEventListener("click", function () {
-      boxes.forEach(function (box, i) {
-        box.checked = false;
-        select.options[i].selected = false;
-      });
-      apply();
+
+    var all = document.createElement("button");
+    all.type = "button";
+    all.textContent = "all";
+    all.addEventListener("click", function () {
+      setAll(true);
     });
-    tools.appendChild(clear);
+
+    var none = document.createElement("button");
+    none.type = "button";
+    none.textContent = "none";
+    none.addEventListener("click", function () {
+      setAll(false);
+    });
+
+    tools.appendChild(all);
+    tools.appendChild(none);
     menu.appendChild(tools);
 
     function show() {

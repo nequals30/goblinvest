@@ -6,8 +6,9 @@ balances, net-worth history, and (coming) investment returns and taxes.
 
 A vault holds your transactions — each a signed amount of one asset, in one
 account, on one date — and prices for the assets that trade publicly. Your own
-decisions about those transactions, such as which category each belongs to, live
-beside the vault in CSV files you can edit, called **adjustments**.
+decisions about those transactions — which category each belongs to, which ones
+belong on a different date — live beside the vault in CSV files you can edit,
+called **adjustments**.
 
 Loading the same transactions twice never double-counts them, so a script that
 loads all of your statements can be re-run at any time.
@@ -65,10 +66,14 @@ v.add_transactions(
 )
 
 v.list_transactions()
-#    transaction_id account_name       date description   amount asset  price  market_value  ownership_share account_group_name
-# 0               1    brokerage 2026-07-02     buy VTI -1000.00   USD    1.0      -1000.00              1.0        investments
-# 1               2    brokerage 2026-07-02     buy VTI     3.20   VTI  312.5       1000.00              1.0        investments
+#    transaction_id account_name       date original_date description   amount asset  price  market_value  ownership_share account_group_name
+# 0               1    brokerage 2026-07-02    2026-07-02     buy VTI -1000.00   USD    1.0      -1000.00              1.0        investments
+# 1               2    brokerage 2026-07-02    2026-07-02     buy VTI     3.20   VTI  312.5       1000.00              1.0        investments
 ```
+
+`date` is the date the transaction counts on and `original_date` is the date the
+statement gave it. They differ only for transactions you have moved — see
+[Effective dates](#effective-dates).
 
 `price` is what the asset was worth on that transaction's date and
 `market_value` is the amount times that price, both in the base currency. The
@@ -240,6 +245,42 @@ v.delete_category("streaming")
     an exception matches the description verbatim, suffix included. File edits
     are written to a temporary file and swapped into place, so an interrupted
     write cannot corrupt them.
+
+## Effective dates
+
+A transaction sometimes belongs on a different date than the one the statement
+gave it: a purchase made in January that posts in February, a check written in
+December and cashed in January. An **effective date** moves it without losing
+where it came from. It is another file in the adjustments folder:
+
+| File | Columns | What it does |
+| --- | --- | --- |
+| `effective_dates.csv` | `account,date,description,amount,asset,effective_date` | moves one exact transaction to one date |
+
+```python
+v.set_effective_date("amex", "2026-02-03", "AMAZON.COM", -42.10, "2026-01-28")
+
+v.list_transactions(start_date="2026-01-01", end_date="2026-01-31")
+#    transaction_id account_name       date original_date description  amount asset ...
+# 0               7         amex 2026-01-28    2026-02-03  AMAZON.COM  -42.10   USD ...
+```
+
+The transaction is named by its original date, the one in `original_date`, and
+is named that way for good. Everything else asks where it counts now: date
+ranges, balances, net-worth history, and the price the transaction is valued at.
+An effective date of `None` puts it back:
+
+```python
+v.set_effective_date("amex", "2026-02-03", "AMAZON.COM", -42.10, None)
+```
+
+`apply_effective_dates()` rebuilds the dates from the file, the same way
+`apply_categories()` rebuilds the categories, and belongs in your load script
+next to it. It returns any rows that no longer match a transaction:
+
+```python
+orphans = v.apply_effective_dates()
+```
 
 ## Encryption
 

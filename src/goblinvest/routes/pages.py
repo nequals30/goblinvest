@@ -65,7 +65,12 @@ def _rows(frame) -> list[dict]:
     return [
         {
             "id": int(row.transaction_id),
+            # `date` is the date the transaction *counts* on and `original_date`
+            # the one the statement gave it — the same when nothing has been
+            # moved. Core keys every adjustment on the original, so that's the
+            # one the row's forms send back; `date` is only what's displayed.
             "date": row.date.date(),
+            "original_date": row.original_date.date(),
             "account": row.account_name,
             "description": row.description,
             "amount": float(row.amount),
@@ -146,6 +151,8 @@ def _month_page(
     step: int = 0,
     *,
     edit: int | None = None,
+    redate: int | None = None,
+    moved: str = "",
     cats: Sequence[str] = (),
     accts: Sequence[str] = (),
     error: str = "",
@@ -158,6 +165,14 @@ def _month_page(
     are still unclassified always render the editor; a classified row renders
     its category as text until its pencil is clicked, which is a plain GET back
     to this page. That keeps one `<select>` on the page instead of one per row.
+
+    `redate` is the same idea for the date cell: the one transaction whose date
+    is open for editing. Every date is a link to this page with its own id in
+    `?redate=`, so the affordance costs no column width.
+
+    `moved` is a `"YYYY-MM"` key: the month a transaction just landed in when it
+    was moved *out* of the one being shown, so the page can say where it went
+    instead of the row silently vanishing.
 
     `cats` and `accts` are the filter picks, straight from the query string.
     """
@@ -208,6 +223,8 @@ def _month_page(
         base_asset=base_asset,
         categories=categories,
         edit=edit,
+        redate=redate,
+        moved_month=months.parse(moved),
         error=error,
         status_code=status_code,
     )
@@ -228,8 +245,22 @@ def month_view(
     mo: int | None = None,
     step: int = 0,
     edit: int | None = None,
+    redate: int | None = None,
+    moved: str = "",
 ):
-    return _month_page(request, user, nav, y, mo, step, edit=edit, cats=cat, accts=acct)
+    return _month_page(
+        request,
+        user,
+        nav,
+        y,
+        mo,
+        step,
+        edit=edit,
+        redate=redate,
+        moved=moved,
+        cats=cat,
+        accts=acct,
+    )
 
 
 # --- categorizing from the month table ---------------------------------------
@@ -307,6 +338,83 @@ def categorize(
             status_code=400,
         )
     return _redirect(back)
+
+
+# --- moving a transaction to the date it belongs on --------------------------
+#
+# Same shape as categorizing: the row's natural key rides in hidden inputs and
+# core does the rest. "save" records an effective date, "reset" drops the
+# decision and the transaction goes back to the date its statement gave it.
+# Nothing here decides what a date means — the two buttons *are* the choice
+# between passing a date and passing None.
+
+
+@router.post("/month/set-date")
+def set_date(
+    request: Request,
+    user: CurrentUser,
+    nav: Nav,
+    y: Annotated[int, Form()],
+    mo: Annotated[int, Form()],
+    scope: Annotated[str, Form()],
+    account: Annotated[str, Form()],
+    # The transaction's *original* date, which is what core names it by even
+    # after it has been moved — sending the effective one would match nothing
+    # the second time a row is edited.
+    date: Annotated[str, Form()],
+    description: Annotated[str, Form()],
+    amount: Annotated[float, Form()],
+    asset: Annotated[str, Form()],
+    cat: Annotated[list[str], Query(default_factory=list)],
+    acct: Annotated[list[str], Query(default_factory=list)],
+    # Defaulted for the same reason as `category` in categorize: a control that
+    # submits nothing should get an answer, not a 422.
+    effective: Annotated[str, Form()] = "",
+    tid: Annotated[int, Form()] = 0,
+):
+    wanted = "" if scope == "clear" else effective.strip()
+    if scope != "clear" and not wanted:
+        return _month_page(
+            request,
+            user,
+            nav,
+            y,
+            mo,
+            redate=tid,
+            cats=cat,
+            accts=acct,
+            error="Pick a date first.",
+            status_code=400,
+        )
+    qs = _filter_qs(cat, acct)
+    params = f"y={y}&mo={mo}" + (f"&{qs}" if qs else "")
+    try:
+        with vaults.open_vault(user.id) as vault:
+            vault.set_effective_date(
+                account, date, description, amount, wanted or None, assets=asset
+            )
+    except vaults.VaultMissing:
+        return _redirect(f"/month?{params}")
+    except vaults.CORE_ERRORS as exc:
+        return _month_page(
+            request,
+            user,
+            nav,
+            y,
+            mo,
+            redate=tid,
+            cats=cat,
+            accts=acct,
+            error=vaults.explain(exc),
+            status_code=400,
+        )
+    # A row moved out of the month on screen is simply gone from it, so the page
+    # it lands back on says where it went. Core accepts any date pandas can
+    # parse, so an unrecognised one just means no notice.
+    landed = months.parse((wanted or date)[: months.KEY_LENGTH])
+    if landed is not None and landed != months.Month(y, mo):
+        return _redirect(f"/month?{params}&moved={landed.key}")
+    return _redirect(f"/month?{params}" + (f"#d{tid}" if tid else ""))
 
 
 @router.get("/dashboard")

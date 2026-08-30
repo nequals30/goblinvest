@@ -57,6 +57,12 @@ open a vault, call its methods, close it. `v.add_account(...)` means "call
 
 ::: goblinvest_core.Vault.list_uncategorized
 
+## Effective dates
+
+::: goblinvest_core.Vault.set_effective_date
+
+::: goblinvest_core.Vault.apply_effective_dates
+
 ## Market prices
 
 ::: goblinvest_core.Vault.populate_yfinance_prices

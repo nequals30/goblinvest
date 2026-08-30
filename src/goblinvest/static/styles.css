@@ -10,6 +10,10 @@
   --ok: #2a5d3e;
   /* Row hover: tinted enough to follow across a wide table on a white one. */
   --row-hover: #e7eee9;
+  /* A cell holding a value that was overridden by hand — light enough not to
+     shout on a page of thirty rows, warm enough to read as "touched". */
+  --moved: #fbf1d7;
+  --moved-hover: #f4e6bd;
   --sidebar-w: 196px;
   --topbar-h: 31px;
 }
@@ -311,11 +315,12 @@ table.grid th[aria-sort="descending"] .sort-btn::after { content: " ↓"; opacit
 }
 .combo-tools {
   display: flex;
-  justify-content: flex-end;
+  gap: 4px;
   border-top: 1px solid var(--border);
   margin-top: 2px;
   padding: 3px 6px 1px;
 }
+.combo-tools button { flex: 1 1 0; }
 .combo-tools button {
   border: 1px solid var(--border);
   background: var(--panel);
@@ -353,6 +358,54 @@ table.grid td.cat a.edit:hover { color: var(--accent); }
 table.grid td.cat a.edit:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* Beats `table.grid button` on specificity, which is the point. */
 table.grid .cat-form button { padding: 1px 5px; font-size: 11px; }
+
+/* moving a transaction's date, in the Month View table
+   Every date is editable, so a pencil on each would be thirty of them down one
+   column (user, 2026-08-29). A dotted underline says "there is something here"
+   at no cost in column width, and the whole cell is the target: the anchor
+   takes the cell's padding so a click anywhere on it opens the editor. */
+table.grid td.c-date.editable { padding: 0; }
+table.grid td.c-date a.redate {
+  display: block;
+  padding: 2px 6px;
+  color: inherit;
+  text-decoration: underline dotted var(--border);
+  text-underline-offset: 3px;
+}
+table.grid td.c-date a.redate:hover {
+  color: var(--accent);
+  text-decoration: underline solid var(--accent);
+}
+table.grid td.c-date a.redate:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* A date that isn't the one the statement gave it. Tinted rather than badged:
+   readable down the column at a glance, and it survives the row hover because
+   the cell's own background wins over the row's. */
+table.grid td.c-date.moved { background: var(--moved); }
+table.grid tbody tr:hover td.c-date.moved { background: var(--moved-hover); }
+
+table.grid td.c-date.editing { padding: 1px 4px; }
+.date-form { display: flex; flex-wrap: nowrap; gap: 3px; align-items: center; }
+/* Undoing the global `form input` rule, which is display:block;width:100% with
+   a page-sized font — in a cell trying to be 1% wide that fills the column and
+   pushes the buttons onto the next line. It is
+   `form input:not([type="checkbox"]):not([type="radio"])`, specificity (0,2,2),
+   so `table.grid` has to be in this selector to outrank it: a class and an
+   attribute alone lose to two elements and two :not()s.
+   `font: inherit` is the other half — a date input takes the UA's font family,
+   not the table's, which is where the typewriter look came from. */
+table.grid .date-form input[type="date"] {
+  display: inline-block;
+  width: auto;
+  margin-top: 0;
+  padding: 0 2px;
+  font: inherit;
+  font-size: 11px;
+  border: 1px solid var(--border);
+}
+table.grid .date-form button { padding: 1px 5px; font-size: 11px; }
+table.grid .date-form a.cancel { color: var(--muted); text-decoration: none; font-size: 13px; }
+table.grid .date-form a.cancel:hover { color: var(--error); }
 
 .pager {
   display: flex;

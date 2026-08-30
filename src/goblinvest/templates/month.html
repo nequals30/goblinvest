@@ -45,12 +45,22 @@
 </div>
 
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
+{% if moved_month %}
+{# A transaction moved out of this month has left the table. Where it went is
+   the one thing the page can't show, so it says it — with the way there. #}
+<div class="notice">Moved to
+  <a href="/month?y={{ moved_month.year }}&amp;mo={{ moved_month.month }}">{{ moved_month.label }}</a>.
+</div>
+{% endif %}
 
 {% if no_vault %}
 <p class="muted">No vault yet. It's created when you sign up — this account predates that.</p>
 {% elif not years %}
 <p class="muted">No transactions yet. Import some statements and they'll show up here.</p>
 {% else %}
+
+{# This month with its filter still on — every link out of the table and back. #}
+{% set month_url = "/month?y=" ~ selected.year ~ "&mo=" ~ selected.month ~ ("&" ~ filter_qs if filter_qs else "") %}
 
 {% if n_total or filter_qs %}
 {# Native multi-selects, upgraded by app.js into checkbox dropdowns. With no
@@ -93,8 +103,50 @@
     </thead>
     <tbody>
       {% for row in rows %}
+      {# A moved transaction counts on `date` and is still named by
+         `original_date`. Its cell is tinted, which is the whole indication —
+         see the date column below. #}
+      {% set moved = row.date != row.original_date %}
       <tr>
-        <td class="c-date" data-sort="{{ row.date.isoformat() }}">{{ row.date.strftime("%-m/%-d") }}</td>
+        {# The date is editable, and says so with an underline rather than a
+           pencil per row: thirty pencils would be a column of noise (user,
+           2026-08-29). The link is the whole cell, and opens the editor for
+           this row only — ?redate=<id>, the pencil's trick without the ink. #}
+        <td class="c-date{% if row.id == redate %} editing{% else %} editable{% endif %}{% if moved %} moved{% endif %}"
+            id="d{{ row.id }}" data-sort="{{ row.date.isoformat() }}">
+          {% if row.id != redate %}
+          <a class="redate" href="{{ month_url }}&amp;redate={{ row.id }}#d{{ row.id }}"
+             {# What it counts on is the cell itself; the tooltip's job is the
+                one thing the tint can't say. #}
+             title="{% if moved %}original date: {{ row.original_date.strftime("%B %-d, %Y") }}{% else %}Change the date this counts on{% endif %}"
+             >{{ row.date.strftime("%-m/%-d") }}</a>
+          {% else %}
+          {# The filter rides on the action URL, as it does for categorize. #}
+          <form method="post" action="/month/set-date{% if filter_qs %}?{{ filter_qs }}{% endif %}" class="date-form">
+            {{ csrf_input }}
+            <input type="hidden" name="y" value="{{ selected.year }}" />
+            <input type="hidden" name="mo" value="{{ selected.month }}" />
+            <input type="hidden" name="tid" value="{{ row.id }}" />
+            <input type="hidden" name="account" value="{{ row.account }}" />
+            {# The statement's own date: core names a transaction by that one
+               however often it's been moved. #}
+            <input type="hidden" name="date" value="{{ row.original_date.isoformat() }}" />
+            <input type="hidden" name="description" value="{{ row.description }}" />
+            <input type="hidden" name="amount" value="{{ row.amount }}" />
+            <input type="hidden" name="asset" value="{{ row.asset }}" />
+            <label class="sr-only" for="d-{{ row.id }}">effective date</label>
+            <input id="d-{{ row.id }}" type="date" name="effective" value="{{ row.date.isoformat() }}" />
+            <button type="submit" name="scope" value="set"
+                    title="Count this transaction on the date above">save</button>
+            {% if moved %}
+            <button type="submit" name="scope" value="clear"
+                    title="Back to the original date, {{ row.original_date.strftime("%B %-d, %Y") }}">reset</button>
+            {% endif %}
+            <a class="cancel" href="{{ month_url }}#d{{ row.id }}" title="leave it where it is"
+               ><span class="sr-only">cancel</span>×</a>
+          </form>
+          {% endif %}
+        </td>
         <td>{{ row.account }}</td>
         <td class="desc">{{ row.description }}</td>
         {# The amount is in the row's own asset; the market value is what it is
@@ -119,7 +171,7 @@
           {% if not unset and row.id != edit %}
           <span class="cat-name">{{ row.category }}</span>
           <a class="edit" title="change category"
-             href="/month?y={{ selected.year }}&amp;mo={{ selected.month }}&amp;edit={{ row.id }}{% if filter_qs %}&amp;{{ filter_qs }}{% endif %}#t{{ row.id }}"
+             href="{{ month_url }}&amp;edit={{ row.id }}#t{{ row.id }}"
              ><span class="sr-only">change category</span>✎</a>
           {% else %}
           {# The filter rides on the action URL, not in a hidden field per row. #}
@@ -129,7 +181,9 @@
             <input type="hidden" name="mo" value="{{ selected.month }}" />
             <input type="hidden" name="tid" value="{{ row.id }}" />
             <input type="hidden" name="account" value="{{ row.account }}" />
-            <input type="hidden" name="date" value="{{ row.date.isoformat() }}" />
+            {# The statement's date, not the effective one: an exception is
+               keyed on the transaction as it arrived. #}
+            <input type="hidden" name="date" value="{{ row.original_date.isoformat() }}" />
             <input type="hidden" name="description" value="{{ row.description }}" />
             <input type="hidden" name="amount" value="{{ row.amount }}" />
             <input type="hidden" name="asset" value="{{ row.asset }}" />

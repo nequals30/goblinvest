@@ -1,7 +1,8 @@
 """The adjustments directory: the user-owned CSVs holding every manual decision
-made about the transactions — which category something belongs to today, and the
-exceptions to those calls. They are inputs like the statement CSVs themselves;
-the vault is rebuilt from them, never the other way around."""
+made about the transactions — which category something belongs to, the exceptions
+to those calls, and the dates that belong somewhere other than where the statement
+put them. They are inputs like the statement CSVs themselves; the vault is rebuilt
+from them, never the other way around."""
 
 import io
 from pathlib import Path
@@ -15,11 +16,13 @@ from goblinvest_core.encryption import _MAGIC, _armor_bytes, _decrypt, _write_at
 _CATEGORIES_FILE = "categories.csv"
 _RULES_FILE = "category_rules.csv"
 _EXCEPTIONS_FILE = "category_exceptions.csv"
+_EFFECTIVE_DATES_FILE = "effective_dates.csv"
 
 _FILES: dict[str, list[str]] = {
     _CATEGORIES_FILE: ["category"],
     _RULES_FILE: ["pattern", "category"],
     _EXCEPTIONS_FILE: ["account", "date", "description", "amount", "asset", "category"],
+    _EFFECTIVE_DATES_FILE: ["account", "date", "description", "amount", "asset", "effective_date"],
 }
 
 

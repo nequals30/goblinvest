@@ -11,10 +11,12 @@ import pandas as pd
 from goblinvest_core._password import _get_password, forget_password
 from goblinvest_core.adjustments import (
     _CATEGORIES_FILE,
+    _EFFECTIVE_DATES_FILE,
     _EXCEPTIONS_FILE,
     _RULES_FILE,
     _ensure_files,
     _folder_is_encrypted,
+    _read_file,
     _write_file,
 )
 from goblinvest_core.categories import (
@@ -46,6 +48,7 @@ _SCHEMA = (
         amount DECIMAL(7,5) NOT NULL,
         asset_id INTEGER NOT NULL,
         category_id INTEGER,
+        effective_date DATE,
         UNIQUE(account_id, trans_date, trans_desc, amount, asset_id)
     );""",
     """
@@ -78,6 +81,14 @@ _SCHEMA = (
 # Where the vault remembers its adjustments folder, stored relative to the
 # vault file so moving or cloning the whole finance folder keeps working.
 _ADJUSTMENTS_KEY = "adjustments_dir"
+
+# The columns that identify one transaction in the adjustments files. The date
+# in it is always the statement's own date, never an effective date.
+_KEY = ["account", "date", "description", "amount", "asset"]
+
+# The date a transaction counts on: its effective date where one has been set,
+# otherwise the date it arrived with.
+_DATE_SQL = "COALESCE(effective_date, trans_date)"
 
 
 def _connect(filepath: Path, password: str | None):
@@ -148,6 +159,58 @@ def _broadcast(inputs: dict[str, object]) -> dict[str, list]:
     return {
         name: [value] * n if _is_scalar(value) else list(value) for name, value in inputs.items()
     }
+
+
+def _natural_key(df: pd.DataFrame, base_asset: str) -> pd.DataFrame:
+    """The five columns that identify one transaction, normalized to the form
+    they are matched in: names lowercased, a blank asset meaning the base
+    currency, the date as ``"YYYY-MM-DD"``. The date is always the transaction's
+    own date, the one the statement gave it — never an effective date, so
+    moving a transaction never orphans the other decisions made about it."""
+    asset = df["asset"].fillna("").astype(str).str.strip()
+    return pd.DataFrame(
+        {
+            "account": df["account"].fillna("").astype(str).str.strip().str.lower(),
+            "date": pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d"),
+            "description": df["description"].fillna("").astype(str),
+            "amount": pd.to_numeric(df["amount"], errors="coerce"),
+            "asset": asset.where(asset != "", base_asset).str.lower(),
+        }
+    )
+
+
+def _ledger_key(ledger: pd.DataFrame, base_asset: str) -> pd.DataFrame:
+    """The same five columns, taken off a ledger query's own column names."""
+    return _natural_key(
+        ledger.rename(
+            columns={
+                "account_name": "account",
+                "trans_date": "date",
+                "trans_desc": "description",
+                "asset_name": "asset",
+            }
+        ),
+        base_asset,
+    )
+
+
+def _check_matches(rows: pd.DataFrame, keys: pd.DataFrame, ledger_keys: pd.DataFrame) -> None:
+    """Refuse rows naming no transaction, reporting all of them at once rather
+    than one call at a time. `rows` is what the caller passed, `keys` its
+    normalized form; only `rows` is shown, so the message reads as it was typed."""
+    unmatched = (
+        keys.merge(ledger_keys, on=_KEY, how="left", indicator=True)["_merge"] == "left_only"
+    )
+    if not unmatched.any():
+        return
+    missing = rows[unmatched.to_numpy()]
+    shown = "\n".join(
+        f"  account={r.account!r}, date={r.date}, description={r.description!r}, "
+        f"amount={r.amount}, asset={r.asset!r}"
+        for r in missing.head(5).itertuples()
+    )
+    more = f"\n  ... and {len(missing) - 5} more" if len(missing) > 5 else ""
+    raise ValueError(f"No transaction matches:\n{shown}{more}")
 
 
 class Vault:
@@ -379,6 +442,7 @@ class Vault:
             if encrypted:
                 forget_password()
             raise
+        vault._add_effective_date_column()
         if adjustments_dir is not None:
             adjustments_dir = Path(adjustments_dir).expanduser()
             _ensure_files(adjustments_dir, encrypted=_folder_is_encrypted(adjustments_dir))
@@ -395,6 +459,31 @@ class Vault:
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
+
+    def _add_effective_date_column(self) -> None:
+        """Give a vault made before effective dates existed somewhere to put
+        them. Adding the column is the whole upgrade: no effective date is set,
+        so every transaction still counts on the date it arrived with."""
+        columns = self._conn.execute("PRAGMA table_info(transactions);").fetchall()
+        if columns and not any(row[1] == "effective_date" for row in columns):
+            with self._conn:
+                self._conn.execute("ALTER TABLE transactions ADD COLUMN effective_date DATE;")
+
+    def _base_asset(self) -> str:
+        """The name of asset 1 — what a blank asset in an adjustments file means."""
+        return self._conn.execute("SELECT asset_name FROM assets WHERE asset_id = 1;").fetchone()[0]
+
+    def _ledger_keys(self, base_asset: str) -> pd.DataFrame:
+        """Every transaction's natural key, to match adjustments files against."""
+        ledger = self._read_df(
+            """
+            SELECT account_name, trans_date, trans_desc, amount, asset_name
+            FROM transactions
+            LEFT JOIN accounts ON accounts.account_id = transactions.account_id
+            LEFT JOIN assets ON assets.asset_id = transactions.asset_id
+            ;"""
+        )
+        return _ledger_key(ledger, base_asset).drop_duplicates()
 
     def _read_df(self, sql: str, params: tuple = ()) -> pd.DataFrame:
         # pd.read_sql only recognizes stdlib sqlite3 connections; going through
@@ -775,7 +864,10 @@ class Vault:
 
         Args:
             start_date: Earliest date to include, as a ``datetime.date`` object
-                or a ``"YYYY-MM-DD"`` string. Included in the result.
+                or a ``"YYYY-MM-DD"`` string. Included in the result. Compared
+                against ``date``, so a transaction moved with
+                [`set_effective_date`][goblinvest_core.Vault.set_effective_date]
+                falls in the range it was moved to.
             end_date: Latest date to include, same formats. Included in the
                 result.
 
@@ -785,7 +877,8 @@ class Vault:
 
             - ``transaction_id`` — unique id of the transaction
             - ``account_name`` — account the transaction belongs to
-            - ``date`` — transaction date (pandas datetime)
+            - ``date`` — the date it counts on (pandas datetime): its effective date where one is set, otherwise the date below
+            - ``original_date`` — the date the statement gave it
             - ``description`` — free-form description
             - ``amount`` — signed amount, in the transaction's asset
             - ``asset`` — name of the asset the amount is denominated in
@@ -801,15 +894,15 @@ class Vault:
         Examples:
             ```python
             v.list_transactions()
-            #    transaction_id account_name       date    description   amount asset      category  price  market_value  ownership_share account_group_name
-            # 0               1     checking 2026-07-01  WHOLEFDS #123   -40.00   USD     groceries    1.0        -40.00              1.0               cash
-            # 1               2    brokerage 2026-07-02        buy VTI -1000.00   USD  unclassified    1.0      -1000.00              1.0        investments
-            # 2               3    brokerage 2026-07-02        buy VTI     3.20   VTI  unclassified  312.5       1000.00              1.0        investments
+            #    transaction_id account_name       date original_date    description   amount asset      category  price  market_value  ownership_share account_group_name
+            # 0               1     checking 2026-07-01    2026-07-01  WHOLEFDS #123   -40.00   USD     groceries    1.0        -40.00              1.0               cash
+            # 1               2    brokerage 2026-07-02    2026-07-02        buy VTI -1000.00   USD  unclassified    1.0      -1000.00              1.0        investments
+            # 2               3    brokerage 2026-07-02    2026-07-02        buy VTI     3.20   VTI  unclassified  312.5       1000.00              1.0        investments
 
             v.list_transactions(start_date="2026-07-02")
-            #    transaction_id account_name       date description   amount asset      category  price  market_value  ownership_share account_group_name
-            # 0               2    brokerage 2026-07-02     buy VTI -1000.00   USD  unclassified    1.0      -1000.00              1.0        investments
-            # 1               3    brokerage 2026-07-02     buy VTI     3.20   VTI  unclassified  312.5       1000.00              1.0        investments
+            #    transaction_id account_name       date original_date description   amount asset      category  price  market_value  ownership_share account_group_name
+            # 0               2    brokerage 2026-07-02    2026-07-02     buy VTI -1000.00   USD  unclassified    1.0      -1000.00              1.0        investments
+            # 1               3    brokerage 2026-07-02    2026-07-02     buy VTI     3.20   VTI  unclassified  312.5       1000.00              1.0        investments
             ```
         """
         df = self._ledger(start_date=start_date, end_date=end_date)
@@ -822,6 +915,7 @@ class Vault:
                 "transaction_id",
                 "account_name",
                 "date",
+                "original_date",
                 "description",
                 "amount",
                 "asset",
@@ -845,22 +939,22 @@ class Vault:
         where = []
         params: list[str] = []
         if start_date is not None:
-            where.append("trans_date >= ?")
+            where.append(f"{_DATE_SQL} >= ?")
             params.append(pd.Timestamp(start_date).strftime("%Y-%m-%d"))
         if end_date is not None:
-            where.append("trans_date <= ?")
+            where.append(f"{_DATE_SQL} <= ?")
             params.append(pd.Timestamp(end_date).strftime("%Y-%m-%d"))
 
         df = self._read_df(
             f"""
-            SELECT trans_id, account_name, trans_date, trans_desc, amount,
+            SELECT trans_id, account_name, {_DATE_SQL}, trans_date, trans_desc, amount,
                    asset_name, category_name, ownership_share, account_group_name
             FROM transactions
             LEFT JOIN accounts ON accounts.account_id = transactions.account_id
             LEFT JOIN assets ON assets.asset_id = transactions.asset_id
             LEFT JOIN categories ON categories.category_id = transactions.category_id
             {"WHERE " + " AND ".join(where) if where else ""}
-            ORDER BY trans_date, account_name
+            ORDER BY {_DATE_SQL}, account_name
             ;""",
             tuple(params),
         )
@@ -868,6 +962,7 @@ class Vault:
             "transaction_id",
             "account_name",
             "date",
+            "original_date",
             "description",
             "amount",
             "asset",
@@ -876,6 +971,7 @@ class Vault:
             "account_group_name",
         ]
         df["date"] = pd.to_datetime(df["date"])
+        df["original_date"] = pd.to_datetime(df["original_date"])
         df["category"] = df["category"].fillna(UNCLASSIFIED)
         return df
 
@@ -1049,9 +1145,10 @@ class Vault:
         **The exceptions file** (``category_exceptions.csv``, columns
         ``account,date,description,amount,asset,category``) categorizes one
         exact transaction, and beats every rule. Its first five columns must
-        match the transaction as `list_transactions` shows it (``asset`` may be
-        left blank for the base currency); account and asset names ignore
-        capitalization.
+        match the transaction as `list_transactions` shows it, with ``date``
+        being the ``original_date`` column — the date the statement gave it
+        (``asset`` may be left blank for the base currency); account and asset
+        names ignore capitalization.
 
         Transactions no file claims are ``"unclassified"`` — see
         [`list_uncategorized`][goblinvest_core.Vault.list_uncategorized].
@@ -1109,39 +1206,18 @@ class Vault:
 
         # Exceptions: normalize the file's key columns to the ledger's form,
         # keep the last row per key, and match with an exact merge.
-        base_asset = self._conn.execute(
-            "SELECT asset_name FROM assets WHERE asset_id = 1;"
-        ).fetchone()[0]
+        base_asset = self._base_asset()
         try:
-            exc_amount = exceptions["amount"].astype(float)
+            exceptions["amount"].astype(float)
         except ValueError:
             raise ValueError(f"{exceptions_path} has a non-numeric amount") from None
-        exc_asset = exceptions["asset"].fillna("").str.strip()
-        exc = pd.DataFrame(
-            {
-                "account": exceptions["account"].fillna("").str.strip().str.lower(),
-                "date": pd.to_datetime(exceptions["date"], errors="coerce").dt.strftime("%Y-%m-%d"),
-                "description": exceptions["description"].fillna(""),
-                "amount": exc_amount,
-                "asset": exc_asset.where(exc_asset != "", base_asset).str.lower(),
-                "category": exceptions["category"],
-            }
-        )
-        key = ["account", "date", "description", "amount", "asset"]
-        exc = exc[~exc.duplicated(subset=key, keep="last")]
+        exc = _natural_key(exceptions, base_asset).assign(category=exceptions["category"])
+        exc = exc[~exc.duplicated(subset=_KEY, keep="last")]
 
         matched: set[int] = set()
         if not exc.empty and not ledger.empty:
-            led = pd.DataFrame(
-                {
-                    "account": ledger["account_name"].str.lower(),
-                    "date": ledger["trans_date"],
-                    "description": ledger["trans_desc"],
-                    "amount": ledger["amount"].astype(float),
-                    "asset": ledger["asset_name"].str.lower(),
-                }
-            )
-            m = led.merge(exc.reset_index(names="_row"), on=key, how="left")
+            led = _ledger_key(ledger, base_asset)
+            m = led.merge(exc.reset_index(names="_row"), on=_KEY, how="left")
             category = category.where(m["category"].isna(), m["category"])
             matched = set(m["_row"].dropna().astype(int))
         orphans = exceptions.loc[sorted(set(exc.index) - matched)].reset_index(drop=True)
@@ -1280,8 +1356,12 @@ class Vault:
         Args:
             accounts: Account name for each transaction, or one for all of
                 them (capitalization ignored).
-            dates: Date of each transaction, as ``datetime.date`` objects or
-                ``"YYYY-MM-DD"`` strings.
+            dates: The transaction's **original** date, the one the statement
+                gave it, as ``datetime.date`` objects or ``"YYYY-MM-DD"``
+                strings — the ``original_date`` column of `list_transactions`,
+                which is what a transaction is named by even after
+                [`set_effective_date`][goblinvest_core.Vault.set_effective_date]
+                has moved it.
             descriptions: The description of each, exactly as
                 `list_transactions` shows it — including any ``" (2)"``
                 suffix, which is what pins down one of two otherwise-identical
@@ -1337,9 +1417,7 @@ class Vault:
                 "assets": assets,
             }
         )
-        base_asset = self._conn.execute(
-            "SELECT asset_name FROM assets WHERE asset_id = 1;"
-        ).fetchone()[0]
+        base_asset = self._base_asset()
 
         category = pd.Series(columns["categories"], dtype=object)
         given = category.notna()
@@ -1367,37 +1445,8 @@ class Vault:
 
         # Every row must name a real transaction, and all the bad ones are
         # reported at once rather than one call at a time.
-        ledger = self._read_df(
-            """
-            SELECT account_name, trans_date, trans_desc, amount, asset_name
-            FROM transactions
-            LEFT JOIN accounts ON accounts.account_id = transactions.account_id
-            LEFT JOIN assets ON assets.asset_id = transactions.asset_id
-            ;"""
-        )
-        key = ["account", "date", "description", "amount", "asset"]
-        led = pd.DataFrame(
-            {
-                "account": ledger["account_name"].str.lower(),
-                "date": ledger["trans_date"],
-                "description": ledger["trans_desc"],
-                "amount": ledger["amount"].astype(float),
-                "asset": ledger["asset_name"].str.lower(),
-            }
-        ).drop_duplicates()
-        lowered = new[key].assign(
-            account=new["account"].str.lower(), asset=new["asset"].str.lower()
-        )
-        unmatched = lowered.merge(led, on=key, how="left", indicator=True)["_merge"] == "left_only"
-        if unmatched.any():
-            missing = new[unmatched.to_numpy()]
-            shown = "\n".join(
-                f"  account={r.account!r}, date={r.date}, description={r.description!r}, "
-                f"amount={r.amount}, asset={r.asset!r}"
-                for r in missing.head(5).itertuples()
-            )
-            more = f"\n  ... and {len(missing) - 5} more" if len(missing) > 5 else ""
-            raise ValueError(f"No transaction matches:\n{shown}{more}")
+        lowered = _natural_key(new, base_asset)
+        _check_matches(new, lowered, self._ledger_keys(base_asset))
 
         # One exception per transaction (the last one given for it).
         new = new[~lowered.duplicated(keep="last").to_numpy()]
@@ -1405,16 +1454,7 @@ class Vault:
         exceptions, _ = _read_category_file(
             adjustments_dir, _EXCEPTIONS_FILE, "category exceptions"
         )
-        exc_asset = exceptions["asset"].fillna("").str.strip()
-        old = pd.DataFrame(
-            {
-                "account": exceptions["account"].fillna("").str.strip().str.lower(),
-                "date": pd.to_datetime(exceptions["date"], errors="coerce").dt.strftime("%Y-%m-%d"),
-                "description": exceptions["description"].fillna(""),
-                "amount": pd.to_numeric(exceptions["amount"], errors="coerce"),
-                "asset": exc_asset.where(exc_asset != "", base_asset).str.lower(),
-            }
-        )
+        old = _natural_key(exceptions, base_asset)
         # Drop whatever the file already said about these transactions; rows
         # given a category come back, rows given None stay gone.
         superseded = pd.MultiIndex.from_frame(old).isin(
@@ -1499,6 +1539,229 @@ class Vault:
         )
         return out.reset_index(drop=True)[columns]
 
+    def set_effective_date(
+        self,
+        accounts: str | Sequence[str],
+        dates: datetime.date | str | Sequence[datetime.date | str],
+        descriptions: str | Sequence[str],
+        amounts: float | Sequence[float],
+        effective_dates: datetime.date | str | None | Sequence[datetime.date | str | None],
+        *,
+        assets: str | None | Sequence[str | None] = None,
+    ) -> None:
+        """Move transactions to the date they belong on, keeping the date the
+        statement gave them.
+
+        A charge that posts in February but belongs to January counts in
+        January from then on: `list_transactions` reports the date you set here
+        as ``date`` and the statement's own as ``original_date``, and every
+        balance, filter and price lookup uses the date you set. Nothing is
+        edited in the ledger — the decision is recorded in your effective dates
+        file, so reloading the statement keeps it.
+
+        One transaction or many: pass parallel lists — the same shape
+        [`add_transactions`][goblinvest_core.Vault.add_transactions] takes —
+        with a lone value applying to all of them.
+
+        Args:
+            accounts: Account name for each transaction, or one for all of
+                them (capitalization ignored).
+            dates: The transaction's **original** date, the one the statement
+                gave it, as ``datetime.date`` objects or ``"YYYY-MM-DD"``
+                strings — the ``original_date`` column of `list_transactions`.
+                A transaction is always named by the date it arrived with, so
+                moving one never breaks the other decisions made about it.
+            descriptions: The description of each, exactly as
+                `list_transactions` shows it — including any ``" (2)"``
+                suffix, which is what pins down one of two otherwise-identical
+                transactions.
+            amounts: The signed amount of each transaction.
+            effective_dates: The date each transaction should count on, or one
+                for all of them, or ``None`` to drop an existing decision (the
+                transaction goes back to its original date). A list may mix
+                dates and ``None`` to move some and restore others in one call.
+            assets: Asset name for each transaction (capitalization ignored),
+                or one for all. ``None`` (default) means the vault's base
+                currency.
+
+        Returns:
+            Nothing.
+
+        Raises:
+            FileNotFoundError: The adjustments folder is missing.
+            ValueError: The inputs have mismatched lengths, an effective date
+                is not a date, or no transaction in the vault matches a row
+                (every unmatched row is named). Nothing is written when this
+                happens.
+
+        Examples:
+            ```python
+            # bought in January, posted in February
+            v.set_effective_date("amex", "2026-02-03", "AMAZON.COM", -42.10, "2026-01-28")
+
+            # a batch, all moved to the same date
+            v.set_effective_date(
+                "amex",
+                ["2026-02-03", "2026-02-04"],
+                ["AMAZON.COM", "AMAZON.COM"],
+                [-42.10, -17.99],
+                "2026-01-28",
+            )
+
+            # put one back where the statement had it
+            v.set_effective_date("amex", "2026-02-03", "AMAZON.COM", -42.10, None)
+            ```
+        """
+        columns = _broadcast(
+            {
+                "accounts": accounts,
+                "dates": dates,
+                "descriptions": descriptions,
+                "amounts": amounts,
+                "effective_dates": effective_dates,
+                "assets": assets,
+            }
+        )
+        base_asset = self._base_asset()
+
+        # An unreadable date is refused before the file is touched.
+        wanted = pd.Series(columns["effective_dates"], dtype=object)
+        given = wanted.notna().to_numpy()
+        effective = pd.Series(pd.NA, index=wanted.index, dtype=object)
+        if given.any():
+            parsed = pd.to_datetime(pd.Series(list(wanted[given])), errors="coerce")
+            if parsed.isna().any():
+                bad = sorted({str(v) for v, ok in zip(wanted[given], parsed.notna()) if not ok})
+                raise ValueError(f"These effective dates are not dates: {', '.join(bad)}")
+            effective[given] = parsed.dt.strftime("%Y-%m-%d").to_numpy()
+
+        asset = pd.Series(columns["assets"], dtype=object).fillna(base_asset)
+        new = pd.DataFrame(
+            {
+                "account": pd.Series(columns["accounts"], dtype=str).str.strip(),
+                "date": pd.to_datetime(list(columns["dates"])).strftime("%Y-%m-%d"),
+                "description": pd.Series(columns["descriptions"], dtype=str),
+                "amount": pd.Series(columns["amounts"], dtype=float),
+                "asset": asset.astype(str).str.strip(),
+                "effective_date": effective,
+            }
+        )
+
+        # Every row must name a real transaction, and all the bad ones are
+        # reported at once rather than one call at a time.
+        keys = _natural_key(new, base_asset)
+        _check_matches(new, keys, self._ledger_keys(base_asset))
+
+        # One decision per transaction (the last one given for it).
+        new = new[~keys.duplicated(keep="last").to_numpy()]
+
+        adjustments_dir = self._adjustments()
+        moves, _ = _read_file(adjustments_dir, _EFFECTIVE_DATES_FILE, "effective dates")
+        # Drop whatever the file already said about these transactions; rows
+        # given a date come back, rows given None stay gone.
+        superseded = pd.MultiIndex.from_frame(_natural_key(moves, base_asset)).isin(
+            pd.MultiIndex.from_frame(keys.loc[new.index])
+        )
+        moves = moves[~superseded]
+        keep = new[new["effective_date"].notna()]
+        if not keep.empty:
+            moves = pd.concat([moves, keep], ignore_index=True)
+        _write_file(adjustments_dir, _EFFECTIVE_DATES_FILE, moves)
+        self.apply_effective_dates()
+
+    def apply_effective_dates(self) -> pd.DataFrame:
+        """Recompute which date every transaction counts on, from your
+        effective dates file.
+
+        The vault is rewritten from the file each time, so this is safe to run
+        as often as you like — and a rebuild script should, alongside
+        [`apply_categories`][goblinvest_core.Vault.apply_categories]. The file
+        lives in the folder the vault remembers — see
+        [`adjustments_dir`][goblinvest_core.Vault.adjustments_dir].
+
+        **The effective dates file** (``effective_dates.csv``, columns
+        ``account,date,description,amount,asset,effective_date``) moves one
+        exact transaction to one date. Its first five columns must match the
+        transaction as `list_transactions` shows it, with ``date`` being the
+        ``original_date`` column — the date the statement gave it (``asset``
+        may be left blank for the base currency); account and asset names
+        ignore capitalization. Transactions no row names count on the date
+        they arrived with.
+
+        Returns:
+            A pandas ``DataFrame`` of file rows that matched no transaction
+            (same columns as the file), so a typo or a reworded bank
+            description never fails silently. Empty means all clean.
+
+        Raises:
+            FileNotFoundError: The adjustments folder is missing, or the vault
+                does not know where it is.
+            ValueError: The file is malformed — missing columns, a missing or
+                unreadable effective date, or a non-numeric amount.
+
+        Examples:
+            ```python
+            orphans = v.apply_effective_dates()
+            if not orphans.empty:
+                print("These moved dates no longer match anything:", orphans)
+            ```
+        """
+        adjustments_dir = self._adjustments()
+        moves, filepath = _read_file(adjustments_dir, _EFFECTIVE_DATES_FILE, "effective dates")
+
+        blank = moves["effective_date"].fillna("").str.strip() == ""
+        if blank.any():
+            raise ValueError(
+                f"{filepath} has {int(blank.sum())} row(s) with no effective date. "
+                "Delete the row to put a transaction back on its own date."
+            )
+        effective = pd.to_datetime(moves["effective_date"], errors="coerce")
+        if effective.isna().any():
+            bad = sorted(set(moves.loc[effective.isna(), "effective_date"]))
+            raise ValueError(f"{filepath} has effective dates that are not dates: {', '.join(bad)}")
+        try:
+            moves["amount"].astype(float)
+        except ValueError:
+            raise ValueError(f"{filepath} has a non-numeric amount") from None
+
+        base_asset = self._base_asset()
+        # A dict would keep the last row per key; the frame does the same with
+        # a dedupe, and the surviving index is what names the orphans.
+        wanted = _natural_key(moves, base_asset).assign(
+            effective_date=effective.dt.strftime("%Y-%m-%d")
+        )
+        wanted = wanted[~wanted.duplicated(subset=_KEY, keep="last")]
+
+        ledger = self._read_df(
+            """
+            SELECT trans_id, account_name, trans_date, trans_desc, amount, asset_name
+            FROM transactions
+            LEFT JOIN accounts ON accounts.account_id = transactions.account_id
+            LEFT JOIN assets ON assets.asset_id = transactions.asset_id
+            ;"""
+        )
+        matched: set[int] = set()
+        updates: list[tuple[str, int]] = []
+        if not wanted.empty and not ledger.empty:
+            m = _ledger_key(ledger, base_asset).merge(
+                wanted.reset_index(names="_row"), on=_KEY, how="left"
+            )
+            hit = m["effective_date"].notna().to_numpy()
+            updates = list(
+                zip(
+                    m.loc[hit, "effective_date"].tolist(),
+                    ledger.loc[hit, "trans_id"].tolist(),
+                )
+            )
+            matched = set(m["_row"].dropna().astype(int))
+
+        with self._conn:
+            self._conn.execute("UPDATE transactions SET effective_date = NULL;")
+            self._conn.executemany(
+                "UPDATE transactions SET effective_date = ? WHERE trans_id = ?;", updates
+            )
+        return moves.loc[sorted(set(wanted.index) - matched)].reset_index(drop=True)
+
     def populate_yfinance_prices(self, assets: str | Sequence[str]) -> None:
         """Fetch daily prices from Yahoo Finance and store them in the vault.
 
@@ -1552,7 +1815,7 @@ class Vault:
 
         for name, asset_id in zip(assets, asset_ids):
             first_date = self._conn.execute(
-                "SELECT min(trans_date) FROM transactions WHERE asset_id = ?",
+                f"SELECT min({_DATE_SQL}) FROM transactions WHERE asset_id = ?",
                 (asset_id,),
             ).fetchone()[0]
             if first_date is None:
@@ -1893,15 +2156,15 @@ class Vault:
             ```
         """
         row = self._read_df(
-            """
+            f"""
             SELECT (SELECT COUNT(*) FROM transactions) AS n_transactions,
                    (SELECT COUNT(*) FROM accounts) AS n_accounts,
                    (SELECT COUNT(*) FROM assets) AS n_assets,
                    (SELECT COUNT(*) FROM categories) AS n_categories,
                    (SELECT COUNT(*) FROM transactions WHERE category_id IS NULL)
                        AS n_uncategorized,
-                   (SELECT MIN(trans_date) FROM transactions) AS first_transaction,
-                   (SELECT MAX(trans_date) FROM transactions) AS last_transaction
+                   (SELECT MIN({_DATE_SQL}) FROM transactions) AS first_transaction,
+                   (SELECT MAX({_DATE_SQL}) FROM transactions) AS last_transaction
             ;"""
         ).iloc[0]
         # int() because sqlite counts arrive as numpy integers.

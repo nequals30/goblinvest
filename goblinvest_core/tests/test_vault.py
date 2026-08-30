@@ -321,6 +321,7 @@ class TestTransactions:
             "transaction_id",
             "account_name",
             "date",
+            "original_date",
             "description",
             "amount",
             "asset",
