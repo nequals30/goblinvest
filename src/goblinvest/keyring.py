@@ -10,50 +10,33 @@ This module keeps **one scope per user**, and `borrow()` enters it around a
 vault operation. Scopes are per-thread in core, so two users' requests can each
 be inside their own at once; nothing here serializes them.
 
-Two things worth knowing:
+**Logged in means unlocked.** Login puts the password here and logout takes it
+away; there is no separate lock and no idle timeout (user, 2026-11-13). Keep the
+scope rather than rebuilding it: core keeps the keys it derives on the scope
+object, which is what makes a repeat open cost ~0.5ms instead of ~83ms.
 
-- **Keep the scope, don't rebuild it.** Turning a password into a key is
-  deliberately slow, and core keeps the keys it derives on the scope object.
-  Reusing it is what makes a repeat open cost ~0.5ms instead of ~83ms.
-- **Core's scopes never expire, so the idle timeout is ours.** Every `borrow()`
-  restarts the clock; `GV_VAULT_TTL_MINUTES` of nobody using it and the scope is
-  dropped.
-
-Nothing here is written to disk, and a restart drops every scope.
+Nothing here is written to disk, and a restart drops every scope — which
+`main.py` turns into a logout.
 """
 
 import threading
-import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import Any
-
-from goblinvest.config import settings
 
 
 class VaultLocked(Exception):
     """This user's vault needs a password that isn't in memory.
 
-    `main.py` turns it into a redirect to `/unlock`, the same way
-    `NotAuthenticated` becomes a redirect to `/login`.
+    `main.py` turns it into a logout: no password in memory means the user
+    isn't logged in, as far as their vault is concerned.
     """
 
 
-@dataclass
-class _Held:
-    scope: Any  # core's password scope; opaque to us
-    expires_at: float
-
-
 # Guards `_held` only. It is never held while a vault is in use, so requests
-# don't wait on each other.
+# don't wait on each other. Values are core's password scopes, opaque to us.
 _lock = threading.Lock()
-_held: dict[int, _Held] = {}
-
-
-def _deadline() -> float:
-    return time.monotonic() + settings().vault_ttl_minutes * 60
+_held: dict[int, Any] = {}
 
 
 def remember(user_id: int, password: str) -> None:
@@ -64,13 +47,13 @@ def remember(user_id: int, password: str) -> None:
     """
     from goblinvest_core import password_scope
 
-    held = _Held(password_scope(password), _deadline())
+    scope = password_scope(password)
     with _lock:
-        _held[user_id] = held
+        _held[user_id] = scope
 
 
 def forget(user_id: int) -> None:
-    """Lock this user's vault now. Their next vault page asks again."""
+    """Drop this user's password. Their next vault page logs them out."""
     with _lock:
         _held.pop(user_id, None)
 
@@ -81,30 +64,20 @@ def forget_all() -> None:
         _held.clear()
 
 
-def _current(user_id: int) -> _Held | None:
-    """This user's held password, dropping it first if it has gone idle."""
-    with _lock:
-        held = _held.get(user_id)
-        if held is not None and time.monotonic() >= held.expires_at:
-            del _held[user_id]
-            return None
-        return held
-
-
 def is_unlocked(user_id: int) -> bool:
-    return _current(user_id) is not None
+    with _lock:
+        return user_id in _held
 
 
 @contextmanager
 def borrow(user_id: int) -> Iterator[None]:
     """Make this user's password the one core uses, for the length of the block.
 
-    Raises `VaultLocked` if there isn't one. Using it restarts the idle clock,
-    so a session someone is actively working in never re-prompts.
+    Raises `VaultLocked` if there isn't one.
     """
-    held = _current(user_id)
-    if held is None:
+    with _lock:
+        scope = _held.get(user_id)
+    if scope is None:
         raise VaultLocked(f"no password held for user {user_id}")
-    held.expires_at = _deadline()
-    with held.scope:
+    with scope:
         yield

@@ -19,7 +19,6 @@ class Settings:
     is_prod: bool
     pbkdf2_iters: int
     session_ttl_days: int
-    vault_ttl_minutes: int
 
     @property
     def db_path(self) -> Path:
@@ -40,10 +39,4 @@ def settings() -> Settings:
         is_prod=os.environ.get("GV_ENV", "dev").lower() == "prod",
         pbkdf2_iters=int(os.environ.get("GV_PBKDF2_ITERS", "600000")),
         session_ttl_days=int(os.environ.get("GV_SESSION_TTL_DAYS", "30")),
-        # How long an encrypted vault stays unlocked with no one touching it.
-        # Much shorter than the session: the cookie only proves who you are,
-        # while this is the key to the data itself, sitting in RAM. Eight hours
-        # covers a day's work without re-typing and re-locks a laptop left open
-        # overnight.
-        vault_ttl_minutes=int(os.environ.get("GV_VAULT_TTL_MINUTES", "480")),
     )

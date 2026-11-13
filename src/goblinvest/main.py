@@ -9,7 +9,14 @@ from fastapi import Depends, FastAPI, Request, status
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from goblinvest.auth import CsrfInvalid, NotAuthenticated, csrf_guard
+from goblinvest import db
+from goblinvest.auth import (
+    SESSION_COOKIE,
+    CsrfInvalid,
+    NotAuthenticated,
+    clear_session_cookie,
+    csrf_guard,
+)
 from goblinvest.config import settings
 from goblinvest.db import init_db
 from goblinvest.keyring import VaultLocked
@@ -58,10 +65,21 @@ def create_app() -> FastAPI:
         return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.exception_handler(VaultLocked)
-    async def _to_unlock(request: Request, exc: VaultLocked):
-        # Same shape as NotAuthenticated: a dependency-deep failure that the
-        # handler can't answer becomes a redirect to the page that fixes it.
-        return RedirectResponse(unlock.unlock_url(request), status_code=status.HTTP_303_SEE_OTHER)
+    def _logged_out(request: Request, exc: VaultLocked):
+        # Logged in means unlocked (user, 2026-11-13), so a session whose
+        # vault password isn't in memory -- a server restart, or a logout in
+        # another browser -- is ended here, and logging in again unlocks.
+        token = request.cookies.get(SESSION_COOKIE)
+        if token:
+            conn = db.connect()
+            try:
+                db.delete_session(conn, token)
+                conn.commit()
+            finally:
+                conn.close()
+        response = RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+        clear_session_cookie(response)
+        return response
 
     @app.exception_handler(CsrfInvalid)
     async def _csrf_failed(request: Request, exc: CsrfInvalid):

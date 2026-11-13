@@ -81,7 +81,7 @@ def is_encrypted(user_id: int) -> bool:
     return path.is_file() and not _starts_with(path, _SQLITE_MAGIC)
 
 
-def _adjustments_armored(user_id: int) -> bool:
+def _adjustments_encrypted(user_id: int) -> bool:
     """Whether any of this user's adjustments CSVs is encrypted.
 
     Checked separately from the vault because the two can differ: core armors
@@ -101,7 +101,7 @@ def needs_password(user_id: int) -> bool:
     This is the question `open_vault` asks before it opens anything, and the
     one that decides whether a page redirects to `/unlock`.
     """
-    return is_encrypted(user_id) or _adjustments_armored(user_id)
+    return is_encrypted(user_id) or _adjustments_encrypted(user_id)
 
 
 def forbid_password_prompts() -> None:

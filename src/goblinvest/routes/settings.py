@@ -9,7 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, Form, Request, status
 from fastapi.responses import RedirectResponse
 
-from goblinvest import auth, db, keyring, vaults
+from goblinvest import auth, db, vaults
 from goblinvest import nav as navmod
 from goblinvest.auth import Conn, CurrentUser
 from goblinvest.nav import Nav
@@ -35,8 +35,6 @@ def _index_page(request: Request, user, nav, *, notice: str = "", error: str = "
         user,
         nav,
         kinds=list(vault_settings.KINDS.values()),
-        encrypted=vaults.needs_password(user.id),
-        unlocked=keyring.is_unlocked(user.id),
         notice=notice,
         error=error,
         status_code=status_code,
@@ -110,6 +108,7 @@ def _account_page(request, user, nav, **context):
         # so changing the account password here leaves the two different. The
         # page has to say so.
         encrypted=vaults.needs_password(user.id),
+        vault_encrypted=vaults.is_encrypted(user.id),
         min_password=MIN_PASSWORD,
         **context,
     )

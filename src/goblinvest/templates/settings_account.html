@@ -6,6 +6,7 @@
 <h1>Account</h1>
 
 <p class="muted">Signed in as <strong>{{ user.username }}</strong>. Usernames can't be changed.</p>
+<p class="muted">Vault {{ 'encrypted' if vault_encrypted else 'not encrypted' }}.</p>
 
 <section class="pane">
   <h2>Change password</h2>

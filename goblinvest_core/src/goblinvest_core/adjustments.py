@@ -44,6 +44,35 @@ def _ensure_files(adjustments_dir: Path, *, encrypted: bool) -> None:
         _write_atomically(filepath, _armor_bytes(header, confirm=True) if encrypted else header)
 
 
+def _match_encryption(adjustments_dir: Path, *, encrypted: bool) -> None:
+    """Make the adjustments files already in a folder agree with a vault being
+    created. Encrypting plain files is done in place; the reverse is refused,
+    because quietly writing a plaintext copy of an encrypted file is the one
+    direction that must never happen by surprise. Only the files this module
+    owns are looked at — anything else in the folder is the user's business.
+    Files that are already encrypted must open with the vault's password."""
+    present = [adjustments_dir / f for f in _FILES if (adjustments_dir / f).is_file()]
+    if not encrypted:
+        armored = [p.name for p in present if _is_armored(p)]
+        if armored:
+            raise ValueError(
+                f"The adjustments files in {adjustments_dir} are encrypted "
+                f"({', '.join(armored)}), so the vault must be too: pass encrypted=True, "
+                "or decrypt_file them first"
+            )
+        return
+    armored = [p for p in present if _is_armored(p)]
+    if armored:
+        # A vault and its adjustments share one password. Decrypting one file
+        # proves this is it; a wrong one raises before anything is written.
+        _decrypt(armored[0])
+    for filepath in present:
+        if not _is_armored(filepath):
+            # The password was settled with confirmation before this runs, so
+            # none of these prompt.
+            _write_atomically(filepath, _armor_bytes(filepath.read_bytes(), confirm=False))
+
+
 def _folder_is_encrypted(adjustments_dir: Path) -> bool:
     """Whether the files already in a folder are encrypted, so files added
     later (a new kind of adjustment) match what is already there."""

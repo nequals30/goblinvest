@@ -308,7 +308,8 @@ remembered.
 Pass `encrypted=True` and the vault file is encrypted with
 [SQLCipher](https://www.zetetic.net/sqlcipher/). Opening it needs the same
 password; without it the file is unreadable. The adjustments files are encrypted
-along with it.
+along with it, including any that were already in the folder. Creating an
+unencrypted vault over encrypted adjustments files is refused.
 
 ```python
 from goblinvest_core import Vault, ask_password

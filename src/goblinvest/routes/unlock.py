@@ -1,15 +1,13 @@
-"""Unlocking an encrypted vault: /unlock and /lock.
+"""/unlock: the vault password, for a vault whose password isn't the account's.
 
-An encrypted vault needs its password once per process (see `keyring.py`), so
-a page that wants vault data and can't get at it raises `VaultLocked`, and
-`main.py` sends the browser here — exactly the shape `/login` already has for
-`NotAuthenticated`. The difference is that you are signed in by the time you
-get here, so this is a normal page with the usual chrome, and its POST carries
-the usual CSRF token.
+Logged in means unlocked, and normally the login password *is* the vault
+password, so this page is never seen. It is for the one case where they differ
+— a vault brought from a REPL, or one left on its old password by an account
+password change, which core can't re-key. Login sends the browser here when its
+password didn't open the vault.
 """
 
 from typing import Annotated
-from urllib.parse import urlparse
 
 from fastapi import APIRouter, Form, Request, status
 from fastapi.responses import RedirectResponse
@@ -21,8 +19,6 @@ from goblinvest.templates import page
 
 router = APIRouter()
 
-UNLOCK_URL = "/unlock"
-
 
 def safe_next(target: str) -> str:
     """A `?next=` reduced to somewhere on this site, or the welcome page.
@@ -33,21 +29,6 @@ def safe_next(target: str) -> str:
     if target.startswith("/") and not target.startswith("//"):
         return target
     return "/"
-
-
-def next_for(request: Request) -> str:
-    """Where to come back to after unlocking, for a request that hit a locked
-    vault. A GET is its own answer; anything else can only guess from the page
-    the form was on, because the body is lost in the redirect either way."""
-    if request.method == "GET":
-        query = f"?{request.url.query}" if request.url.query else ""
-        return safe_next(request.url.path + query)
-    return safe_next(urlparse(request.headers.get("referer", "")).path or "/")
-
-
-def unlock_url(request: Request) -> str:
-    target = next_for(request)
-    return UNLOCK_URL if target == "/" else f"{UNLOCK_URL}?next={target}"
 
 
 def _redirect(to: str) -> RedirectResponse:
@@ -95,9 +76,3 @@ def do_unlock(
             status_code=status.HTTP_400_BAD_REQUEST,
         )
     return _redirect(target)
-
-
-@router.post("/lock")
-def lock(user: CurrentUser, next: Annotated[str, Form()] = "/settings"):
-    keyring.forget(user.id)
-    return _redirect(safe_next(next))

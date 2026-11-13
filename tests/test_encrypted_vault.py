@@ -58,9 +58,10 @@ def test_opting_out_leaves_everything_in_the_clear(client):
     assert head(storage.vault_path(1)) == b"SQLite format 3\x00"
     assert not vaults.needs_password(1)
     assert client.get("/month").status_code == 200
+    assert "Vault not encrypted." in client.get("/settings/account").text
 
 
-# --- locking and unlocking ----------------------------------------------------
+# --- logged in means unlocked -------------------------------------------------
 
 
 def test_a_fresh_signup_is_already_unlocked(encrypted):
@@ -68,65 +69,33 @@ def test_a_fresh_signup_is_already_unlocked(encrypted):
     assert encrypted.get("/month").status_code == 200
 
 
-def test_locking_sends_the_next_page_to_unlock(encrypted):
-    encrypted.post("/lock")
-    assert not keyring.is_unlocked(1)
+def test_no_password_in_memory_logs_you_out(encrypted):
+    """A server restart empties the keyring but not the session table. Logged
+    in means unlocked, so that session is ended rather than sent to an unlock
+    page."""
+    keyring.forget_all()  # what a restart does
 
     response = encrypted.get("/month?y=2026&mo=5", follow_redirects=False)
     assert response.status_code == 303
-    assert response.headers["location"] == "/unlock?next=/month?y=2026&mo=5"
+    assert response.headers["location"] == "/login"
+    # the session itself is gone, not just the redirect
+    assert encrypted.get("/settings", follow_redirects=False).headers["location"] == "/login"
 
-
-def test_the_unlock_page_asks_for_a_password(encrypted):
-    encrypted.post("/lock")
-    html = encrypted.get("/unlock").text
-    assert 'name="password"' in html
-    assert 'type="password"' in html
-
-
-def test_unlocking_returns_to_where_you_were(encrypted):
-    encrypted.post("/lock")
-    response = encrypted.post(
-        "/unlock", data={"password": PASSWORD, "next": "/month"}, follow_redirects=False
-    )
-    assert response.status_code == 303
-    assert response.headers["location"] == "/month"
+    encrypted.post("/login", data={"username": "goblin", "password": PASSWORD})
     assert keyring.is_unlocked(1)
+    assert encrypted.get("/month").status_code == 200
 
 
-def test_the_wrong_password_is_refused_and_not_kept(encrypted):
-    encrypted.post("/lock")
-    response = encrypted.post("/unlock", data={"password": "not it", "next": "/month"})
-    assert response.status_code == 400
-    assert "doesn&#39;t open this vault" in response.text
-    assert not keyring.is_unlocked(1)
+def test_there_is_no_separate_lock(encrypted):
+    assert encrypted.post("/lock", follow_redirects=False).status_code in (404, 405)
+    html = encrypted.get("/settings").text
+    assert 'action="/lock"' not in html and "unlocked" not in html
 
 
 def test_unlocking_an_unlocked_vault_just_goes_there(encrypted):
     response = encrypted.get("/unlock?next=/month", follow_redirects=False)
     assert response.status_code == 303
     assert response.headers["location"] == "/month"
-
-
-def test_next_cannot_leave_the_site(encrypted):
-    encrypted.post("/lock")
-    response = encrypted.post(
-        "/unlock",
-        data={"password": PASSWORD, "next": "//evil.example/steal"},
-        follow_redirects=False,
-    )
-    assert response.headers["location"] == "/"
-
-
-def test_an_idle_vault_relocks(encrypted, monkeypatch):
-    from goblinvest.config import settings
-
-    monkeypatch.setenv("GV_VAULT_TTL_MINUTES", "0")
-    settings.cache_clear()
-    keyring.remember(1, PASSWORD)  # remembered with a zero-length lifetime
-
-    assert not keyring.is_unlocked(1)
-    assert encrypted.get("/month", follow_redirects=False).status_code == 303
 
 
 def test_a_locked_vault_never_reaches_for_a_terminal(encrypted):
@@ -159,10 +128,10 @@ def test_logging_out_locks_the_vault(encrypted):
     assert not keyring.is_unlocked(1)
 
 
-def test_a_changed_account_password_leaves_the_vault_on_the_old_one(encrypted):
-    """Core has no call that re-keys a vault (deferred, see CLAUDE.md), so the
-    two drift apart and the vault keeps the password it was made with."""
-    response = encrypted.post(
+def _drift(client):
+    """Change the account password, which leaves the vault on the old one
+    (core has no re-key; deferred, see CLAUDE.md), then log out."""
+    response = client.post(
         "/settings/account/password",
         data={
             "current_password": PASSWORD,
@@ -171,18 +140,46 @@ def test_a_changed_account_password_leaves_the_vault_on_the_old_one(encrypted):
         },
     )
     assert response.status_code == 200
-    encrypted.post("/logout")
+    client.post("/logout")
 
-    encrypted.post("/login", data={"username": "goblin", "password": "newhoard1"})
-    assert not keyring.is_unlocked(1)  # the new password doesn't open it
 
-    assert (
-        encrypted.post(
-            "/unlock", data={"password": PASSWORD, "next": "/"}, follow_redirects=False
-        ).headers["location"]
-        == "/"
+def test_a_vault_with_its_own_password_is_asked_for_at_login(encrypted):
+    _drift(encrypted)
+
+    response = encrypted.post(
+        "/login", data={"username": "goblin", "password": "newhoard1"}, follow_redirects=False
     )
+    assert response.headers["location"] == "/unlock"
+    assert not keyring.is_unlocked(1)
+    html = encrypted.get("/unlock").text
+    assert 'type="password"' in html
+
+    response = encrypted.post(
+        "/unlock", data={"password": PASSWORD, "next": "/month"}, follow_redirects=False
+    )
+    assert response.headers["location"] == "/month"
     assert keyring.is_unlocked(1)
+
+
+def test_the_wrong_vault_password_is_refused_and_not_kept(encrypted):
+    _drift(encrypted)
+    encrypted.post("/login", data={"username": "goblin", "password": "newhoard1"})
+
+    response = encrypted.post("/unlock", data={"password": "not it", "next": "/month"})
+    assert response.status_code == 400
+    assert "doesn&#39;t open this vault" in response.text
+    assert not keyring.is_unlocked(1)
+
+
+def test_next_cannot_leave_the_site(encrypted):
+    _drift(encrypted)
+    encrypted.post("/login", data={"username": "goblin", "password": "newhoard1"})
+    response = encrypted.post(
+        "/unlock",
+        data={"password": PASSWORD, "next": "//evil.example/steal"},
+        follow_redirects=False,
+    )
+    assert response.headers["location"] == "/"
 
 
 def test_the_account_page_says_the_vault_keeps_its_password(encrypted):
@@ -225,11 +222,17 @@ def test_armored_adjustments_alone_still_need_the_password(client, cheap_kdf):
 
     assert not vaults.is_encrypted(1)
     assert vaults.needs_password(1)
-    assert client.get("/settings", follow_redirects=False).status_code == 200
-    assert client.post("/settings/adjustments/apply", follow_redirects=False).status_code == 303
+    # reading the armored files with nothing in memory ends the session
+    response = client.post("/settings/adjustments/apply", follow_redirects=False)
+    assert response.headers["location"] == "/login"
 
-    assert not vaults.unlock(1, "wrong")
-    assert vaults.unlock(1, "files-only")
+    # the account password doesn't open these files, so login asks for theirs
+    response = client.post(
+        "/login", data={"username": "goblin", "password": PASSWORD}, follow_redirects=False
+    )
+    assert response.headers["location"] == "/unlock"
+    assert client.post("/unlock", data={"password": "wrong"}).status_code == 400
+    client.post("/unlock", data={"password": "files-only"})
     response = client.post("/settings/adjustments/apply", follow_redirects=True)
     assert "Adjustments applied." in response.text
 
@@ -296,15 +299,9 @@ def test_a_whole_months_work_survives_encryption(encrypted):
     assert b"Whole Foods" not in storage.vault_path(1).read_bytes()
 
 
-def test_the_settings_page_reports_the_lock_state(encrypted):
-    html = encrypted.get("/settings").text
-    assert "are encrypted" in html and "unlocked" in html
-    assert 'action="/lock"' in html
-
-    encrypted.post("/lock")
-    html = encrypted.get("/settings").text
-    assert "locked" in html
-    assert 'href="/unlock?next=/settings"' in html
+def test_the_account_page_says_the_vault_is_encrypted(encrypted):
+    assert "Vault encrypted." in encrypted.get("/settings/account").text
+    assert "Vault encrypted" not in encrypted.get("/settings").text
 
 
 def test_concurrent_requests_against_one_encrypted_vault(encrypted):
@@ -369,4 +366,4 @@ def test_a_password_core_has_forgotten_is_dropped(encrypted):
         forget_password()  # what core does to a scope on a failed decrypt
         v.apply_categories()  # reads the armored adjustments: needs the password
     assert not keyring.is_unlocked(1)
-    assert encrypted.get("/month", follow_redirects=False).status_code == 303
+    assert encrypted.get("/month", follow_redirects=False).headers["location"] == "/login"

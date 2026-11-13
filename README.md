@@ -16,12 +16,10 @@ Then open <http://127.0.0.1:8080> and sign up.
 ## Encryption
 
 Signing up encrypts your vault and its adjustments files with your account password,
-unless you clear the checkbox on the form. Your password is held in the server's memory
-and never written to disk, so restarting the server locks every vault; the app then asks
-for the password again on the next page that needs it. **There is no password reset** —
+unless you clear the checkbox on the form. While you are logged in, the server holds that
+password in memory so it can read your vault; logging out drops it, and it is never
+written to disk. Restarting the server logs everyone out. **There is no password reset** —
 an encrypted vault cannot be opened without its password.
-
-`GV_VAULT_TTL_MINUTES` (default 480) is how long an unused vault stays unlocked.
 
 ## Running with Docker
 

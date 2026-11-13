@@ -1027,3 +1027,88 @@ class TestEncrypted:
         _typed(monkeypatch, pw)
         with Vault.open(filepath) as v:
             assert len(v.list_accounts()) == 0
+
+
+class TestAdjustmentsFollowTheVault:
+    """Vault.create makes the adjustments folder agree with `encrypted`."""
+
+    FILES = [
+        "categories.csv",
+        "category_rules.csv",
+        "category_exceptions.csv",
+        "effective_dates.csv",
+    ]
+
+    @staticmethod
+    def _adjustments(filepath):
+        return filepath.parent / f"{filepath.stem}_adjustments"
+
+    def _plain_vault_with_a_rule(self, filepath):
+        with Vault.create(filepath) as v:
+            v.add_category("streaming")
+            v.set_category_rule("Netflix", "streaming")
+
+    def _armored(self, filepath):
+        folder = self._adjustments(filepath)
+        return {f: (folder / f).read_bytes().startswith(b"GVENC") for f in self.FILES}
+
+    def test_encrypted_rebuild_encrypts_plain_files(self, filepath, monkeypatch):
+        self._plain_vault_with_a_rule(filepath)
+        assert not any(self._armored(filepath).values())
+
+        _typed(monkeypatch, "hunter2", "hunter2")
+        with Vault.create(filepath, encrypted=True, overwrite=True) as v:
+            v.add_account("checking")
+            v.add_transactions("checking", ["2026-01-05"], ["Netflix"], [-15.0])
+            v.apply_categories()
+            assert v.list_transactions()["category"].tolist() == ["streaming"]
+        assert all(self._armored(filepath).values())
+
+    def test_the_users_other_files_are_left_alone(self, filepath, monkeypatch):
+        self._plain_vault_with_a_rule(filepath)
+        notes = self._adjustments(filepath) / "notes.txt"
+        notes.write_text("mine")
+
+        _typed(monkeypatch, "hunter2", "hunter2")
+        Vault.create(filepath, encrypted=True, overwrite=True).close()
+        assert notes.read_text() == "mine"
+
+    def test_plain_vault_over_encrypted_files_is_refused(self, filepath, monkeypatch):
+        _typed(monkeypatch, "hunter2", "hunter2")
+        Vault.create(filepath, encrypted=True).close()
+        before = filepath.read_bytes()
+
+        with pytest.raises(ValueError, match="encrypted=True"):
+            Vault.create(filepath, overwrite=True)
+        assert filepath.read_bytes() == before  # old vault not deleted
+        assert all(self._armored(filepath).values())
+
+    def test_wrong_password_for_the_folder_is_refused(self, filepath, monkeypatch):
+        _typed(monkeypatch, "hunter2", "hunter2")
+        Vault.create(filepath, encrypted=True).close()
+        forget_password()
+        before = filepath.read_bytes()
+
+        _typed(monkeypatch, "other", "other")
+        with pytest.raises(ValueError, match="wrong password"):
+            Vault.create(filepath, encrypted=True, overwrite=True)
+        assert filepath.read_bytes() == before
+
+    def test_half_encrypted_folder_is_completed(self, filepath, monkeypatch):
+        _typed(monkeypatch, "hunter2", "hunter2")
+        Vault.create(filepath, encrypted=True).close()
+        folder = self._adjustments(filepath)
+        (folder / "category_rules.csv").write_text("pattern,category\n")  # a plain one
+
+        _no_prompt(monkeypatch)  # password still remembered from the first create
+        Vault.create(filepath, encrypted=True, overwrite=True).close()
+        assert all(self._armored(filepath).values())
+
+    def test_open_never_rewrites_a_mixed_folder(self, filepath, monkeypatch):
+        _typed(monkeypatch, "hunter2", "hunter2")
+        Vault.create(filepath, encrypted=True).close()
+        rules = self._adjustments(filepath) / "category_rules.csv"
+        rules.write_text("pattern,category\n")
+
+        Vault.open(filepath).close()
+        assert rules.read_text() == "pattern,category\n"

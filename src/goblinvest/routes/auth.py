@@ -62,16 +62,15 @@ def login(request: Request, conn: Conn, username: Username, password: Password):
             status_code=status.HTTP_401_UNAUTHORIZED,
         )
 
-    # An encrypted vault made at signup uses the account password, so logging
-    # in is normally the whole unlock — one password, no second prompt. A vault
-    # with a password of its own (one brought from a REPL, or made before a
-    # password change) just fails here silently and gets /unlock on the first
-    # page that wants it.
-    if vaults.needs_password(user.id) and not keyring.is_unlocked(user.id):
-        vaults.unlock(user.id, password)
+    # Logged in means unlocked. An encrypted vault made at signup uses the
+    # account password, so logging in is normally the whole unlock. A vault
+    # with a password of its own (brought from a REPL, or left behind by an
+    # account password change) gets asked for it once, right now, on /unlock.
+    locked = vaults.needs_password(user.id) and not keyring.is_unlocked(user.id)
+    landing = "/unlock" if locked and not vaults.unlock(user.id, password) else "/"
 
     token = auth.create_session(conn, user.id)
-    response = _redirect("/")
+    response = _redirect(landing)
     auth.set_session_cookie(response, token)
     return response
 
@@ -132,8 +131,8 @@ def logout(request: Request, conn: Conn, user: MaybeUser):
     if token:
         db.delete_session(conn, token)
     if user is not None:
-        # Logging out puts the key away too. It also locks this user's other
-        # sessions, which is the safe direction to be wrong in.
+        # Logging out puts the key away too, which logs this user's other
+        # sessions out on their next vault page -- the safe direction.
         keyring.forget(user.id)
     response = _redirect("/login")
     auth.clear_session_cookie(response)

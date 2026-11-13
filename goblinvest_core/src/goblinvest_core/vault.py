@@ -21,6 +21,7 @@ from goblinvest_core.adjustments import (
     _RULES_FILE,
     _ensure_files,
     _folder_is_encrypted,
+    _match_encryption,
     _read_file,
     _write_file,
 )
@@ -363,10 +364,11 @@ class Vault:
                 was entered in the last 15 minutes; otherwise you are prompted at
                 the terminal — it is never passed in code. If ``False``, the file
                 is a normal, unencrypted SQLite database readable by any SQLite tool.
-                The adjustments files are encrypted along with the vault.
+                The adjustments files are encrypted along with the vault,
+                including any already in the folder.
             overwrite: If ``True``, delete any existing file at ``filepath`` and
                 start fresh. If ``False``, an existing file is an error. An
-                adjustments folder that is already there is kept as it is.
+                adjustments folder that is already there keeps its contents.
             adjustments_dir: Where the adjustments files live, e.g.
                 ``"~/finance/adjustments"``. Created if it does not exist yet.
                 ``None`` (default) puts them in a folder named after the vault
@@ -380,6 +382,9 @@ class Vault:
                 folder above ``adjustments_dir`` does not.
             FileExistsError: A file already exists at ``filepath`` and
                 ``overwrite`` is ``False``.
+            ValueError: ``encrypted`` is ``False`` but the adjustments files
+                are encrypted, or it is ``True`` and they are encrypted with a
+                different password. Nothing is changed.
 
         Examples:
             ```python
@@ -402,9 +407,12 @@ class Vault:
             adjustments_dir = filepath.parent / f"{filepath.stem}_adjustments"
         adjustments_dir = Path(adjustments_dir).expanduser()
 
-        # Settle the password before touching the existing file, so a failed or
-        # abandoned prompt can't leave the old vault already deleted.
+        # Settle the password, and the adjustments files' encryption, before
+        # touching the existing file, so a failed or abandoned prompt or a
+        # refused folder can't leave the old vault already deleted.
         password = _get_password(confirm=True) if encrypted else None
+        if adjustments_dir.is_dir():
+            _match_encryption(adjustments_dir, encrypted=encrypted)
         if filepath.exists():
             filepath.unlink()
 
@@ -417,8 +425,7 @@ class Vault:
                 (default_asset,),
             )
         vault = cls(conn, filepath)
-        # Never touches an adjustments folder that is already there, so a
-        # rebuild keeps every decision you have made.
+        # Only adds missing files: a rebuild keeps every decision you have made.
         _ensure_files(adjustments_dir, encrypted=encrypted)
         vault._remember_adjustments_dir(adjustments_dir)
         return vault
