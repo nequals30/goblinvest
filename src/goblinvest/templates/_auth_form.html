@@ -22,7 +22,14 @@
       <input type="password" name="password" required
              autocomplete="{% if mode == 'signup' %}new-password{% else %}current-password{% endif %}" />
     </label>
-    {% if mode == 'signup' %}<p class="hint">At least 8 characters.</p>{% endif %}
+    {% if mode == 'signup' %}
+    <p class="hint">At least 8 characters.</p>
+    <label class="check">
+      <input type="checkbox" name="encrypt" value="1" checked />
+      encrypt my vault with this password
+    </label>
+    <p class="hint">There is no password reset. Lose it and the vault can't be opened.</p>
+    {% endif %}
     <button type="submit">{{ submit }}</button>
   </form>
 </div>

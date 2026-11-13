@@ -27,6 +27,9 @@
       <input type="password" name="confirm_password" required autocomplete="new-password" />
     </label>
     <p class="hint">At least {{ min_password }} characters.</p>
+    {% if encrypted %}
+    <p class="hint">The vault keeps the password it was encrypted with; this doesn't change it.</p>
+    {% endif %}
     <button type="submit">change password</button>
   </form>
 </section>

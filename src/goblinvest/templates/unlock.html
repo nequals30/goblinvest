@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Unlock · Goblinvest{% endblock %}
+
+{% block content %}
+<h1>Unlock vault</h1>
+
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+<form method="post" action="/unlock" class="narrow">
+  {{ csrf_input }}
+  <input type="hidden" name="next" value="{{ next }}" />
+  <label>
+    vault password
+    <input type="password" name="password" required autocomplete="current-password" autofocus />
+  </label>
+  <button type="submit">unlock</button>
+</form>
+{% endblock %}

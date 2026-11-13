@@ -9,7 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, Form, Request, status
 from fastapi.responses import RedirectResponse
 
-from goblinvest import auth, db, vaults
+from goblinvest import auth, db, keyring, vaults
 from goblinvest import nav as navmod
 from goblinvest.auth import Conn, CurrentUser
 from goblinvest.nav import Nav
@@ -35,6 +35,8 @@ def _index_page(request: Request, user, nav, *, notice: str = "", error: str = "
         user,
         nav,
         kinds=list(vault_settings.KINDS.values()),
+        encrypted=vaults.needs_password(user.id),
+        unlocked=keyring.is_unlocked(user.id),
         notice=notice,
         error=error,
         status_code=status_code,
@@ -97,16 +99,25 @@ def apply_adjustments(request: Request, user: CurrentUser, nav: Nav):
 # --- account ----------------------------------------------------------------
 
 
-@router.get("/account")
-def account(request: Request, user: CurrentUser, nav: Nav, changed: bool = False):
+def _account_page(request, user, nav, **context):
     return page(
         request,
         "settings_account.html",
         user,
         nav,
-        changed=changed,
+        # An encrypted vault keeps whatever password it was made with: core has
+        # no call that re-keys one, and that is deferred (CLAUDE.md, Encryption),
+        # so changing the account password here leaves the two different. The
+        # page has to say so.
+        encrypted=vaults.needs_password(user.id),
         min_password=MIN_PASSWORD,
+        **context,
     )
+
+
+@router.get("/account")
+def account(request: Request, user: CurrentUser, nav: Nav, changed: bool = False):
+    return _account_page(request, user, nav, changed=changed)
 
 
 def _password_problem(user: db.User, current: str, new: str, confirm: str) -> str | None:
@@ -133,14 +144,8 @@ def change_password(
 ):
     problem = _password_problem(user, current_password, new_password, confirm_password)
     if problem is not None:
-        return page(
-            request,
-            "settings_account.html",
-            user,
-            nav,
-            error=problem,
-            min_password=MIN_PASSWORD,
-            status_code=status.HTTP_400_BAD_REQUEST,
+        return _account_page(
+            request, user, nav, error=problem, status_code=status.HTTP_400_BAD_REQUEST
         )
 
     db.update_password(conn, user.id, auth.hash_password(new_password))

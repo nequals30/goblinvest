@@ -21,6 +21,10 @@ services:
       # The month picker asks the container what month it is; containers are
       # UTC unless told otherwise.
       TZ: ${TZ:-UTC}
+      # How long an encrypted vault stays unlocked with nobody using it. The
+      # password is only ever in this container's memory, so a restart locks
+      # every vault regardless.
+      GV_VAULT_TTL_MINUTES: ${GV_VAULT_TTL_MINUTES:-480}
 
     # Your own uid/gid, so the folder below stays writable by the container and
     # stays yours on the host. `id -u` / `id -g`.

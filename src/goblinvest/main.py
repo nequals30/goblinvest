@@ -12,10 +12,12 @@ from fastapi.staticfiles import StaticFiles
 from goblinvest.auth import CsrfInvalid, NotAuthenticated, csrf_guard
 from goblinvest.config import settings
 from goblinvest.db import init_db
+from goblinvest.keyring import VaultLocked
 from goblinvest.routes import auth as auth_routes
-from goblinvest.routes import pages, vault_settings
+from goblinvest.routes import pages, unlock, vault_settings
 from goblinvest.routes import settings as settings_routes
 from goblinvest.templates import STATIC_DIR, templates
+from goblinvest.vaults import forbid_password_prompts
 
 
 @asynccontextmanager
@@ -26,6 +28,11 @@ async def lifespan(app: FastAPI):
     # one after it is 7ms, which reads as "the app is slow" on exactly the
     # request a person is most likely to notice.
     import goblinvest_core  # noqa: F401
+
+    # There is no terminal behind a request, so a core call that reaches for
+    # one must fail loudly and immediately rather than hang. Vault passwords
+    # come from `keyring` instead.
+    forbid_password_prompts()
 
     yield
 
@@ -50,6 +57,12 @@ def create_app() -> FastAPI:
     async def _to_login(request: Request, exc: NotAuthenticated):
         return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
 
+    @app.exception_handler(VaultLocked)
+    async def _to_unlock(request: Request, exc: VaultLocked):
+        # Same shape as NotAuthenticated: a dependency-deep failure that the
+        # handler can't answer becomes a redirect to the page that fixes it.
+        return RedirectResponse(unlock.unlock_url(request), status_code=status.HTTP_303_SEE_OTHER)
+
     @app.exception_handler(CsrfInvalid)
     async def _csrf_failed(request: Request, exc: CsrfInvalid):
         # Realistically this is a form left open across a logout, so the page
@@ -60,6 +73,7 @@ def create_app() -> FastAPI:
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     app.include_router(auth_routes.router)
+    app.include_router(unlock.router)
     app.include_router(settings_routes.router)
     app.include_router(vault_settings.router)
     app.include_router(pages.router)

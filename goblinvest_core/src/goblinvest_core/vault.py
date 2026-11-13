@@ -8,7 +8,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from goblinvest_core._password import _get_password, forget_password
+from goblinvest_core._password import (
+    _drop_vault_key,
+    _get_password,
+    _get_vault_key,
+    forget_password,
+)
 from goblinvest_core.adjustments import (
     _CATEGORIES_FILE,
     _EFFECTIVE_DATES_FILE,
@@ -91,19 +96,23 @@ _KEY = ["account", "date", "description", "amount", "asset"]
 _DATE_SQL = "COALESCE(effective_date, trans_date)"
 
 
-def _connect(filepath: Path, password: str | None):
-    """Open a DB-API connection, keyed with SQLCipher when a password is given,
-    and verify the result is actually readable (catches wrong passwords and
-    plain-vs-encrypted mixups, which SQLite only reports on first read)."""
-    if password is None:
+def _connect(filepath: Path, password: str | None, *, raw_key: bytes | None = None):
+    """Open a DB-API connection, keyed with SQLCipher when a password or a raw
+    key is given, and verify the result is actually readable (catches wrong
+    passwords and plain-vs-encrypted mixups, which SQLite only reports on first
+    read). A raw key skips SQLCipher's own key derivation."""
+    if password is None and raw_key is None:
         conn = sqlite3.connect(filepath)
         db_error = sqlite3.DatabaseError
     else:
         import sqlcipher3
 
         conn = sqlcipher3.connect(str(filepath))
-        # PRAGMA does not support parameter binding; escape by doubling quotes.
-        conn.execute("PRAGMA key = '{}'".format(password.replace("'", "''")))
+        if raw_key is not None:
+            conn.execute(f"PRAGMA key = \"x'{raw_key.hex()}'\"")
+        else:
+            # PRAGMA does not support parameter binding; escape by doubling quotes.
+            conn.execute("PRAGMA key = '{}'".format(password.replace("'", "''")))
         db_error = sqlcipher3.DatabaseError
 
     try:
@@ -112,9 +121,28 @@ def _connect(filepath: Path, password: str | None):
         conn.close()
         raise ValueError(
             f"Cannot read vault at {filepath}: "
-            + ("wrong password" if password else "the file is not a vault")
+            + ("wrong password" if password or raw_key else "the file is not a vault")
         ) from None
     return conn
+
+
+def _open_encrypted(filepath: Path, *, salt: bytes):
+    """Connect to an encrypted vault with the password in force. An encrypted
+    vault file begins with its 16-byte salt, which is what the cached raw key
+    is filed under."""
+    password = _get_password(confirm=False)
+    try:
+        return _connect(filepath, None, raw_key=_get_vault_key(salt))
+    except ValueError:
+        _drop_vault_key(salt)
+    # The raw key didn't open it. Normally that is a wrong password, but it
+    # could also be a SQLCipher whose key derivation no longer matches ours, so
+    # let SQLCipher derive from the passphrase before calling it wrong.
+    try:
+        return _connect(filepath, password)
+    except ValueError:
+        forget_password()
+        raise
 
 
 def _ids_from_names(
@@ -434,14 +462,11 @@ class Vault:
         if not filepath.is_file():
             raise FileNotFoundError(f"No vault exists at {filepath}")
         with filepath.open("rb") as f:
-            encrypted = f.read(16) != _SQLITE_MAGIC
-        password = _get_password(confirm=False) if encrypted else None
-        try:
-            vault = cls(_connect(filepath, password), filepath)
-        except ValueError:
-            if encrypted:
-                forget_password()
-            raise
+            header = f.read(16)
+        if header == _SQLITE_MAGIC:
+            vault = cls(_connect(filepath, None), filepath)
+        else:
+            vault = cls(_open_encrypted(filepath, salt=header), filepath)
         vault._add_effective_date_column()
         if adjustments_dir is not None:
             adjustments_dir = Path(adjustments_dir).expanduser()

@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Form, Request, status
 from fastapi.responses import RedirectResponse
 
-from goblinvest import auth, db, nav, storage, vaults
+from goblinvest import auth, db, keyring, nav, storage, vaults
 from goblinvest.auth import Conn, MaybeUser
 from goblinvest.templates import templates
 
@@ -62,6 +62,14 @@ def login(request: Request, conn: Conn, username: Username, password: Password):
             status_code=status.HTTP_401_UNAUTHORIZED,
         )
 
+    # An encrypted vault made at signup uses the account password, so logging
+    # in is normally the whole unlock — one password, no second prompt. A vault
+    # with a password of its own (one brought from a REPL, or made before a
+    # password change) just fails here silently and gets /unlock on the first
+    # page that wants it.
+    if vaults.needs_password(user.id) and not keyring.is_unlocked(user.id):
+        vaults.unlock(user.id, password)
+
     token = auth.create_session(conn, user.id)
     response = _redirect("/")
     auth.set_session_cookie(response, token)
@@ -76,7 +84,13 @@ def signup_form(request: Request, user: MaybeUser):
 
 
 @router.post("/signup")
-def signup(request: Request, conn: Conn, username: Username, password: Password):
+def signup(
+    request: Request,
+    conn: Conn,
+    username: Username,
+    password: Password,
+    encrypt: Annotated[bool, Form()] = False,
+):
     username = username.strip()
     problem = _validate(username, password)
     if problem is not None:
@@ -89,13 +103,17 @@ def signup(request: Request, conn: Conn, username: Username, password: Password)
 
     try:
         storage.provision_user_storage(user_id)
-        # Unencrypted: core can only take a password from a getpass prompt, and
-        # there's no terminal here (request #1). Also creates vault_adjustments/.
-        vaults.create_vault(user_id)
+        # The account password doubles as the vault password, so there is only
+        # one to remember and logging in unlocks the vault. Core has no way to
+        # change a vault's password, so an account password change leaves the
+        # vault on the old one — see /settings/account. Also creates
+        # vault_adjustments/, armored to match.
+        vaults.create_vault(user_id, password=password if encrypt else None)
     except OSError:
         # Don't leave a user who has no home on disk.
         db.delete_user(conn, user_id)
         conn.commit()
+        keyring.forget(user_id)
         return _form_error(
             request, "signup.html", "Could not set up your files. Try again.", username
         )
@@ -109,10 +127,14 @@ def signup(request: Request, conn: Conn, username: Username, password: Password)
 
 
 @router.post("/logout")
-def logout(request: Request, conn: Conn):
+def logout(request: Request, conn: Conn, user: MaybeUser):
     token = request.cookies.get(auth.SESSION_COOKIE)
     if token:
         db.delete_session(conn, token)
+    if user is not None:
+        # Logging out puts the key away too. It also locks this user's other
+        # sessions, which is the safe direction to be wrong in.
+        keyring.forget(user.id)
     response = _redirect("/login")
     auth.clear_session_cookie(response)
     return response

@@ -29,6 +29,17 @@ class BrowserClient(TestClient):
         return super().post(url, data=data, **kwargs)
 
 
+@pytest.fixture(autouse=True)
+def empty_keyring():
+    """Vault passwords live in process memory, not in the tmp data dir, so two
+    tests that both make user 1 would otherwise share an unlock."""
+    from goblinvest import keyring
+
+    keyring.forget_all()
+    yield
+    keyring.forget_all()
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     """A TestClient with an isolated data dir and cheap password hashing."""
@@ -45,6 +56,16 @@ def client(tmp_path, monkeypatch):
         yield c
 
     settings.cache_clear()
+
+
+@pytest.fixture
+def cheap_kdf(monkeypatch):
+    """Core derives vault-file keys with PBKDF2 at 600k iterations, ~126ms a
+    time. Same reason GV_PBKDF2_ITERS drops for the suite: correctness of the
+    plumbing is what these tests are about, not the work factor."""
+    from goblinvest_core import _password
+
+    monkeypatch.setattr(_password, "_PBKDF2_ITERATIONS", 1000)
 
 
 @pytest.fixture

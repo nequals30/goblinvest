@@ -25,6 +25,24 @@
 </ul>
 
 <section class="pane">
+  <h2>Encryption</h2>
+  <p class="muted">
+    {% if encrypted %}Vault and adjustments files are encrypted &middot;
+      {{ 'unlocked' if unlocked else 'locked' }}
+    {% else %}Vault and adjustments files are not encrypted{% endif %}
+  </p>
+  {% if encrypted and unlocked %}
+  <form method="post" action="/lock" class="row">
+    {{ csrf_input }}
+    <input type="hidden" name="next" value="/settings" />
+    <button type="submit">lock vault</button>
+  </form>
+  {% elif encrypted %}
+  <p><a href="/unlock?next=/settings">unlock vault</a></p>
+  {% endif %}
+</section>
+
+<section class="pane">
   <h2>Adjustments files</h2>
   <form method="post" action="/settings/adjustments/apply" class="row">
     {{ csrf_input }}
