@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% from "_ledger.html" import ledger_body with context %}
+{% block title %}Find Transactions · Goblinvest{% endblock %}
+
+{% macro pager() %}
+{# Server-side: each page is its own request, so it's links, and it works with
+   JavaScript off. Not app.js's pager — that one hides rows already sent. #}
+{% if n_pages > 1 %}
+<div class="pager">
+  {% if prev_url %}<a href="{{ prev_url }}">‹ prev</a>{% else %}<span class="off">‹ prev</span>{% endif %}
+  <span>{{ "{:,}".format(first + 1) }}–{{ "{:,}".format(first + rows|length) }} of {{ "{:,}".format(n_total) }}</span>
+  {% if next_url %}<a href="{{ next_url }}">next ›</a>{% else %}<span class="off">next ›</span>{% endif %}
+</div>
+{% endif %}
+{% endmacro %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Find Transactions</h1>
+</div>
+
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+{% if no_vault %}
+<p class="muted">No vault yet. It's created when you sign up — this account predates that.</p>
+{% else %}
+
+{# One GET form, submitted by its button and nothing else: data-manual tells
+   app.js not to apply the checkbox dropdowns on every tick, the way Month
+   View's do. `search=1` is what tells a search for nothing — which lists the
+   whole ledger — apart from arriving at the page. #}
+<form class="filters find" method="get" action="/find" data-manual>
+  <input type="hidden" name="search" value="1" />
+  {% for filter in filters %}
+  <label class="sr-only" for="f-{{ filter.name }}">{{ filter.label }}</label>
+  <select id="f-{{ filter.name }}" name="{{ filter.name }}" multiple size="4"
+          data-combo="{{ filter.label }}">
+    {% for option in filter.options %}
+    <option value="{{ option }}" {% if option in filter.picked %}selected{% endif %}>{{ option }}</option>
+    {% endfor %}
+  </select>
+  {% endfor %}
+  <label class="field">
+    <span class="sr-only">description</span>
+    <input type="text" id="f-desc" name="desc" value="{{ picks.desc }}" size="18"
+           placeholder="description, e.g. *gas*" />
+  </label>
+  <label class="field">from <input type="date" id="f-start" name="start" value="{{ picks.start }}" /></label>
+  <label class="field">to <input type="date" id="f-end" name="end" value="{{ picks.end }}" /></label>
+  <label class="toggle" title="Value each row at your share of its account">
+    <input type="checkbox" id="f-share" name="share" value="1"
+           {% if picks.share %}checked{% endif %} />
+    apply my ownership share
+  </label>
+  <button type="submit" class="search">Search</button>
+  {% if search %}<a class="clear" href="/find">clear</a>{% endif %}
+</form>
+
+{% if search %}
+{% set find_url = "/find?" ~ here %}
+<div class="table-wrap">
+  {{ pager() }}
+  {# Sorted on the server — a page of a sorted result has to come from all of
+     it — so the headers are links, not app.js's buttons, and the table isn't
+     .sortable. Same look: .is-sortable and aria-sort drive the arrows. #}
+  <table class="grid dense">
+    <thead>
+      <tr>
+        {% for h in headers %}
+        <th class="is-sortable {{ h.css }}" aria-sort="{{ h.aria }}"><a class="sort-btn" href="{{ h.href }}">{{ h.label }}</a></th>
+        {% endfor %}
+      </tr>
+    </thead>
+    {{ ledger_body(find_url, "/find", here, date_format="%-m/%-d/%Y", total_label="Total, all pages" if n_pages > 1 else "Total") }}
+  </table>
+
+  {% if not rows %}
+  <p class="muted">No transactions match.</p>
+  {% else %}
+  {{ pager() }}
+  {% endif %}
+  <p class="hint">{{ "{:,}".format(n_total) }} transaction{{ "" if n_total == 1 else "s" }}</p>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

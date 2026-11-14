@@ -2,6 +2,7 @@
 
 import datetime
 import os
+import re
 import sqlite3
 from collections.abc import Sequence
 from pathlib import Path
@@ -158,6 +159,34 @@ def _ids_from_names(
         unknown = sorted(set(names[ids.isna()]))
         raise ValueError(f"These {kind} are not registered in the vault: {', '.join(unknown)}")
     return ids.astype(int).tolist()
+
+
+def _as_list(value: str | Sequence[str]) -> list[str]:
+    """One name or many, as a list of names."""
+    return [value] if isinstance(value, str) else list(value)
+
+
+def _is_one_of(values: pd.Series, wanted: list[str], known: pd.Series, kind: str) -> pd.Series:
+    """Which of `values` are among `wanted`, ignoring case. A wanted name that
+    isn't in `known` raises, naming every such name at once, so a typo is an
+    error rather than an empty result that looks like a real answer."""
+    typed = pd.Series(wanted, dtype=str)
+    wanted = typed.str.lower()
+    unknown = ~wanted.isin(known.str.lower())
+    if unknown.any():
+        names = sorted(set(typed[unknown]))
+        raise ValueError(f"These {kind} are not in the vault: {', '.join(names)}")
+    return values.astype(str).str.lower().isin(wanted)
+
+
+def _description_pattern(patterns: list[str]) -> str:
+    """One regular expression for a list of description patterns, any of which
+    may match. `*` stands for any run of characters and nothing else is
+    special. Each pattern must match the whole description, ignoring
+    surrounding whitespace and a " (2)"-style duplicate suffix, the same way
+    category rules match descriptions."""
+    bodies = (".*".join(re.escape(part) for part in p.strip().split("*")) for p in patterns)
+    return r"\s*(?:" + "|".join(bodies) + r")(?:\s\(\d+\))?\s*"
 
 
 def _is_scalar(value) -> bool:
@@ -887,13 +916,22 @@ class Vault:
         *,
         start_date: datetime.date | str | None = None,
         end_date: datetime.date | str | None = None,
+        accounts: str | Sequence[str] | None = None,
+        account_groups: str | Sequence[str] | None = None,
+        assets: str | Sequence[str] | None = None,
+        categories: str | Sequence[str] | None = None,
+        descriptions: str | Sequence[str] | None = None,
         apply_ownership_share: bool = False,
     ) -> pd.DataFrame:
         """Return the ledger, with account and asset details joined in and each
         transaction valued at its own date's price.
 
-        Without arguments this returns every transaction. Give a start date, an
-        end date, or both to narrow it to a date range.
+        Without arguments this returns every transaction. Each argument below
+        narrows the result. Every filter takes one value or a list of them: a
+        transaction matches a list if it matches any value in it, and it must
+        match every filter given. Names are matched ignoring capitalization,
+        and a name the vault doesn't have raises an error. An empty list
+        matches no transactions.
 
         Args:
             start_date: Earliest date to include, as a ``datetime.date`` object
@@ -903,6 +941,18 @@ class Vault:
                 falls in the range it was moved to.
             end_date: Latest date to include, same formats. Included in the
                 result.
+            accounts: Account names to include.
+            account_groups: Account group names to include.
+            assets: Asset names to include, the base currency among them.
+            categories: Categories to include. ``"unclassified"`` selects the
+                transactions without a category.
+            descriptions: Description patterns to include. A pattern matches
+                the whole description, ignoring capitalization, and ``*``
+                stands for any run of characters: ``"*gas*"`` matches any
+                description containing "gas", ``"shell*"`` any starting with
+                "shell", and ``"Netflix"`` only "Netflix" itself. A same-day
+                duplicate suffix such as " (2)" is ignored, so ``"Netflix"``
+                also matches "Netflix (2)".
             apply_ownership_share: Multiply ``market_value`` by the account's
                 ``ownership_share``, so a joint account reports your share of
                 each transaction rather than the whole of it.
@@ -939,9 +989,24 @@ class Vault:
             #    transaction_id account_name       date original_date description   amount asset      category  price  market_value  ownership_share account_group_name
             # 0               2    brokerage 2026-07-02    2026-07-02     buy VTI -1000.00   USD  unclassified    1.0      -1000.00              1.0        investments
             # 1               3    brokerage 2026-07-02    2026-07-02     buy VTI     3.20   VTI  unclassified  312.5       1000.00              1.0        investments
+
+            v.list_transactions(accounts="checking", descriptions="wholefds*")
+            #    transaction_id account_name       date original_date    description  amount asset   category  price  market_value  ownership_share account_group_name
+            # 0               1     checking 2026-07-01    2026-07-01  WHOLEFDS #123  -40.00   USD  groceries    1.0        -40.00              1.0               cash
             ```
         """
         df = self._ledger(start_date=start_date, end_date=end_date)
+        # Filtered before pricing, since pricing is the expensive part.
+        df = df[
+            self._selected(
+                df,
+                accounts=accounts,
+                account_groups=account_groups,
+                assets=assets,
+                categories=categories,
+                descriptions=descriptions,
+            )
+        ]
         df["price"] = self._prices_per_row(df)
         value = df["amount"] * df["price"]
         if apply_ownership_share:
@@ -965,6 +1030,50 @@ class Vault:
                 "account_group_name",
             ]
         ]
+
+    def _selected(
+        self,
+        ledger: pd.DataFrame,
+        *,
+        accounts: str | Sequence[str] | None,
+        account_groups: str | Sequence[str] | None,
+        assets: str | Sequence[str] | None,
+        categories: str | Sequence[str] | None,
+        descriptions: str | Sequence[str] | None,
+    ) -> pd.Series:
+        """Which ledger rows pass `list_transactions`'s filters, as one mask."""
+        keep = pd.Series(True, index=ledger.index)
+        if accounts is not None or account_groups is not None:
+            known = self._read_df("SELECT account_name, account_group_name FROM accounts;")
+            if accounts is not None:
+                keep &= _is_one_of(
+                    ledger["account_name"], _as_list(accounts), known["account_name"], "accounts"
+                )
+            if account_groups is not None:
+                keep &= _is_one_of(
+                    ledger["account_group_name"],
+                    _as_list(account_groups),
+                    known["account_group_name"].dropna(),
+                    "account groups",
+                )
+        if assets is not None:
+            known = self._read_df("SELECT asset_name FROM assets;")["asset_name"]
+            keep &= _is_one_of(ledger["asset"], _as_list(assets), known, "assets")
+        if categories is not None:
+            known = self._read_df("SELECT category_name FROM categories;")["category_name"]
+            known = pd.concat([known, pd.Series([UNCLASSIFIED])])
+            keep &= _is_one_of(ledger["category"], _as_list(categories), known, "categories")
+        if descriptions is not None:
+            patterns = _as_list(descriptions)
+            if patterns:
+                keep &= (
+                    ledger["description"]
+                    .astype(str)
+                    .str.fullmatch(_description_pattern(patterns), case=False)
+                )
+            else:
+                keep &= False
+        return keep
 
     def _ledger(
         self,

@@ -1,10 +1,12 @@
-"""The signed-in pages. Month View is real; the rest are still placeholders.
+"""The signed-in pages. Month View and Find Transactions are real; the rest are
+still placeholders.
 
 No finance logic here — these are thin renderers over what core returns.
 """
 
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Annotated
 from urllib.parse import urlencode
 
@@ -357,8 +359,8 @@ def categorize(
     # (#t<id>), and on an error it keeps that row's editor open.
     qs = _page_qs(cat, acct, share)
     back = f"/month?y={y}&mo={mo}" + (f"&{qs}" if qs else "") + (f"#t{tid}" if tid else "")
-    picked = category.strip()
-    if not picked:
+    error = _categorize(user.id, scope, account, date, description, amount, asset, category)
+    if error:
         return _month_page(
             request,
             user,
@@ -369,14 +371,33 @@ def categorize(
             cats=cat,
             accts=acct,
             share=share,
-            error="Pick a category first.",
+            error=error,
             status_code=400,
         )
+    return _redirect(back)
+
+
+def _categorize(
+    user_id: int,
+    scope: str,
+    account: str,
+    date: str,
+    description: str,
+    amount: float,
+    asset: str,
+    category: str,
+) -> str:
+    """One row's category decision, made in the vault — for Month View and Find
+    Transactions alike. Returns the error to show, or "" when there's nothing to
+    say and the page should redirect."""
+    picked = category.strip()
+    if not picked:
+        return "Pick a category first."
     # "unclassified" is the one option that isn't a category — it's the absence
     # of one, which core spells `None`.
     wanted = None if picked.lower() == UNCLASSIFIED else picked
     try:
-        with vaults.open_vault(user.id) as vault:
+        with vaults.open_vault(user_id) as vault:
             if scope == "all":
                 vault.set_category_rule(description, wanted)
             else:
@@ -387,22 +408,10 @@ def categorize(
                     account, date, description, amount, wanted, assets=asset
                 )
     except vaults.VaultMissing:
-        return _redirect(back)
+        return ""
     except vaults.CORE_ERRORS as exc:
-        return _month_page(
-            request,
-            user,
-            nav,
-            y,
-            mo,
-            edit=tid,
-            cats=cat,
-            accts=acct,
-            share=share,
-            error=vaults.explain(exc),
-            status_code=400,
-        )
-    return _redirect(back)
+        return vaults.explain(exc)
+    return ""
 
 
 # --- moving a transaction to the date it belongs on --------------------------
@@ -438,31 +447,10 @@ def set_date(
     effective: Annotated[str, Form()] = "",
     tid: Annotated[int, Form()] = 0,
 ):
-    wanted = "" if scope == "clear" else effective.strip()
-    if scope != "clear" and not wanted:
-        return _month_page(
-            request,
-            user,
-            nav,
-            y,
-            mo,
-            redate=tid,
-            cats=cat,
-            accts=acct,
-            share=share,
-            error="Pick a date first.",
-            status_code=400,
-        )
     qs = _page_qs(cat, acct, share)
     params = f"y={y}&mo={mo}" + (f"&{qs}" if qs else "")
-    try:
-        with vaults.open_vault(user.id) as vault:
-            vault.set_effective_date(
-                account, date, description, amount, wanted or None, assets=asset
-            )
-    except vaults.VaultMissing:
-        return _redirect(f"/month?{params}")
-    except vaults.CORE_ERRORS as exc:
+    error = _set_date(user.id, scope, account, date, description, amount, asset, effective)
+    if error:
         return _month_page(
             request,
             user,
@@ -473,9 +461,10 @@ def set_date(
             cats=cat,
             accts=acct,
             share=share,
-            error=vaults.explain(exc),
+            error=error,
             status_code=400,
         )
+    wanted = "" if scope == "clear" else effective.strip()
     # A row moved out of the month on screen is simply gone from it, so the page
     # it lands back on says where it went. Core accepts any date pandas can
     # parse, so an unrecognised one just means no notice.
@@ -483,6 +472,386 @@ def set_date(
     if landed is not None and landed != months.Month(y, mo):
         return _redirect(f"/month?{params}&moved={landed.key}")
     return _redirect(f"/month?{params}" + (f"#d{tid}" if tid else ""))
+
+
+def _set_date(
+    user_id: int,
+    scope: str,
+    account: str,
+    date: str,
+    description: str,
+    amount: float,
+    asset: str,
+    effective: str,
+) -> str:
+    """One row's effective date, recorded in the vault — or dropped, for
+    "reset". Returns the error to show, or "" when the page should redirect."""
+    wanted = "" if scope == "clear" else effective.strip()
+    if scope != "clear" and not wanted:
+        return "Pick a date first."
+    try:
+        with vaults.open_vault(user_id) as vault:
+            vault.set_effective_date(
+                account, date, description, amount, wanted or None, assets=asset
+            )
+    except vaults.VaultMissing:
+        return ""
+    except vaults.CORE_ERRORS as exc:
+        return vaults.explain(exc)
+    return ""
+
+
+# --- Find Transactions --------------------------------------------------------
+#
+# A search over the whole ledger. Unlike a month, the answer can be every
+# transaction there is, which is past the ~1-2k rows a page can carry whole
+# (see Tables in CLAUDE.md) — so this table is paged on the server, and because
+# a sort has to see every row to be right, it's sorted on the server too, with
+# the column and direction in the URL. Core does the filtering: it is asked
+# for exactly the rows that match. Sorting and slicing those is ordering and
+# selection, not arithmetic.
+
+FIND_PAGE_SIZE = 100
+
+# Sortable column -> the key a row sorts by. Text sorts ignoring case, the way
+# the client-side sort does. A key of None (an unpriced market value) sorts
+# after everything, whichever way the column is going.
+SORT_KEYS = {
+    "date": lambda row: row["date"],
+    "account": lambda row: row["account"].lower(),
+    "description": lambda row: row["description"].lower(),
+    "amount": lambda row: row["amount"],
+    "asset": lambda row: row["asset"].lower(),
+    "mv": lambda row: row["market_value"],
+    "category": lambda row: row["category"].lower(),
+}
+
+
+@dataclass(frozen=True)
+class Search:
+    """What the Find form asked for — everything that decides which rows match.
+    Empty means "don't narrow by this", the same as an untouched control."""
+
+    accts: tuple[str, ...] = ()
+    cats: tuple[str, ...] = ()
+    assets: tuple[str, ...] = ()
+    desc: str = ""
+    start: str = ""
+    end: str = ""
+    share: bool = False
+
+    def pairs(self) -> list[tuple[str, str]]:
+        """As query-string pairs, `search=1` first: that's what says the form
+        was submitted at all, so a search for nothing still lists everything."""
+        pairs = [("search", "1")]
+        pairs += [("acct", a) for a in self.accts]
+        pairs += [("cat", c) for c in self.cats]
+        pairs += [("asset", a) for a in self.assets]
+        for name in ("desc", "start", "end"):
+            if value := getattr(self, name):
+                pairs.append((name, value))
+        if self.share:
+            pairs.append(("share", "1"))
+        return pairs
+
+    def core_filters(self) -> dict:
+        """As `list_transactions` arguments. An empty pick is left out rather
+        than passed, because core reads an empty list as "match nothing"."""
+        return {
+            "accounts": list(self.accts) or None,
+            "categories": list(self.cats) or None,
+            "assets": list(self.assets) or None,
+            "descriptions": [self.desc] if self.desc else None,
+            "start_date": self.start or None,
+            "end_date": self.end or None,
+            "apply_ownership_share": self.share,
+        }
+
+
+def _find_qs(search: Search, sort: str = "", desc: bool = False, page: int = 1) -> str:
+    """The Find page as it's being looked at — the search, the sort, the page —
+    as a query string. Leaves out whatever is at its default."""
+    pairs = search.pairs()
+    if sort:
+        pairs.append(("sort", sort))
+        if desc:
+            pairs.append(("dir", "desc"))
+    if page > 1:
+        pairs.append(("page", str(page)))
+    return urlencode(pairs)
+
+
+def _sorted(rows: list[dict], sort: str, desc: bool) -> list[dict]:
+    """The rows in the order a column header asked for. Ties keep the order
+    they came in, which is `_ordered()`'s — date, then size."""
+    key = SORT_KEYS.get(sort)
+    if key is None:
+        return rows
+    present = [row for row in rows if key(row) is not None]
+    missing = [row for row in rows if key(row) is None]
+    return sorted(present, key=key, reverse=desc) + missing
+
+
+def _headers(search: Search, sort: str, desc: bool) -> list[dict]:
+    """Each column header's link: sort by it, or flip it if it's the current
+    one. A fresh sort goes back to page 1. With no sort asked for, the date
+    reads as ascending, because that's the order the rows are in."""
+    current = sort if sort in SORT_KEYS else "date"
+    out = []
+    for col, label, css in (
+        ("date", "date", "c-date"),
+        ("account", "account", ""),
+        ("description", "description", ""),
+        ("amount", "amount", "num"),
+        ("asset", "asset", ""),
+        ("mv", "market value", "num"),
+        ("category", "category", ""),
+    ):
+        on = col == current
+        flip = on and not desc
+        out.append(
+            {
+                "label": label,
+                "css": css,
+                "aria": ("descending" if desc else "ascending") if on else "none",
+                "href": "/find?" + _find_qs(search, col, flip),
+            }
+        )
+    return out
+
+
+def _find_page(
+    request: Request,
+    user,
+    nav,
+    search: Search | None,
+    *,
+    sort: str = "",
+    desc: bool = False,
+    page_no: int = 1,
+    edit: int | None = None,
+    redate: int | None = None,
+    error: str = "",
+    status_code: int = 200,
+):
+    """Find Transactions, rendered from scratch. `search` is None until the form
+    has been submitted — the page opens on the form alone, not on the whole
+    ledger. The GET calls this; so does a POST that has an error to show."""
+    search_error = ""
+    rows: list[dict] = []
+    try:
+        with vaults.open_vault(user.id) as vault:
+            accounts = [str(n) for n in vault.list_accounts()["account_name"]]
+            categories = [str(n) for n in vault.list_categories()["category_name"]]
+            assets = [str(n) for n in vault.list_assets()["asset_name"]]
+            base_asset = vaults.base_asset(vault)
+            if search is not None:
+                try:
+                    rows = _ordered(_rows(vault.list_transactions(**search.core_filters())))
+                except vaults.CORE_ERRORS as exc:
+                    # A misspelled name in a hand-edited URL, a deleted account
+                    # in a bookmark, a date pandas can't read: core names it.
+                    search_error = vaults.explain(exc)
+    except vaults.VaultMissing:
+        return page(request, "find.html", user, nav, no_vault=True, filters=[], search=None)
+
+    picks = search or Search()
+    rows = _sorted(rows, sort, desc)
+    n_pages = max(1, math.ceil(len(rows) / FIND_PAGE_SIZE))
+    page_no = min(max(page_no, 1), n_pages)
+    first = (page_no - 1) * FIND_PAGE_SIZE
+    shown = rows[first : first + FIND_PAGE_SIZE]
+    here = _find_qs(picks, sort, desc, page_no)
+    return page(
+        request,
+        "find.html",
+        user,
+        nav,
+        search=search,
+        picks=picks,
+        # Every name the vault has, not only those in the results: this is
+        # where a search starts, and "unclassified" is a category core accepts.
+        # A pick the vault no longer has stays on offer so it can be unticked.
+        filters=[
+            {
+                "name": name,
+                "label": label,
+                "options": sorted(set(options) | set(picked), key=str.lower),
+                "picked": set(picked),
+            }
+            for name, label, options, picked in (
+                ("acct", "account", accounts, picks.accts),
+                ("cat", "category", [UNCLASSIFIED, *categories], picks.cats),
+                ("asset", "asset", assets, picks.assets),
+            )
+        ],
+        headers=_headers(picks, sort, desc),
+        rows=shown,
+        n_total=len(rows),
+        first=first,
+        page_no=page_no,
+        n_pages=n_pages,
+        prev_url=f"/find?{_find_qs(picks, sort, desc, page_no - 1)}" if page_no > 1 else "",
+        next_url=f"/find?{_find_qs(picks, sort, desc, page_no + 1)}" if page_no < n_pages else "",
+        # Every matching row, not the page's: a total of one page out of
+        # several answers no question anyone asked. With more than one page the
+        # label says so (user, 2026-11-14).
+        total=_total(rows),
+        here=here,
+        share=picks.share,
+        base_asset=base_asset,
+        categories=categories,
+        edit=edit,
+        redate=redate,
+        error=error or search_error,
+        status_code=400 if search_error else status_code,
+    )
+
+
+# The search, as query parameters. Shared by the GET and by the two row POSTs,
+# which carry it on their action URL the way Month View's carry its filter.
+SearchAcct = Annotated[list[str], Query(alias="acct", default_factory=list)]
+SearchCat = Annotated[list[str], Query(alias="cat", default_factory=list)]
+SearchAsset = Annotated[list[str], Query(alias="asset", default_factory=list)]
+
+
+def _search(
+    searched: bool,
+    acct: list[str],
+    cat: list[str],
+    asset: list[str],
+    desc: str,
+    start: str,
+    end: str,
+    share: bool,
+) -> Search | None:
+    if not searched:
+        return None
+    return Search(
+        tuple(acct), tuple(cat), tuple(asset), desc.strip(), start.strip(), end.strip(), share
+    )
+
+
+@router.get("/find")
+def find_transactions(
+    request: Request,
+    user: CurrentUser,
+    nav: Nav,
+    acct: SearchAcct,
+    cat: SearchCat,
+    asset: SearchAsset,
+    search: bool = False,
+    desc: str = "",
+    start: str = "",
+    end: str = "",
+    share: bool = False,
+    sort: str = "",
+    dir: str = "",
+    page: int = 1,
+    edit: int | None = None,
+    redate: int | None = None,
+):
+    return _find_page(
+        request,
+        user,
+        nav,
+        _search(search, acct, cat, asset, desc, start, end, share),
+        sort=sort if sort in SORT_KEYS else "",
+        desc=dir == "desc",
+        page_no=page,
+        edit=edit,
+        redate=redate,
+    )
+
+
+@router.post("/find/categorize")
+def find_categorize(
+    request: Request,
+    user: CurrentUser,
+    nav: Nav,
+    scope: Annotated[str, Form()],
+    account: Annotated[str, Form()],
+    date: Annotated[str, Form()],
+    description: Annotated[str, Form()],
+    amount: Annotated[float, Form()],
+    asset_name: Annotated[str, Form(alias="asset")],
+    acct: SearchAcct,
+    cat: SearchCat,
+    asset: SearchAsset,
+    search: bool = False,
+    desc: str = "",
+    start: str = "",
+    end: str = "",
+    share: bool = False,
+    sort: str = "",
+    dir: str = "",
+    page: int = 1,
+    category: Annotated[str, Form()] = "",
+    tid: Annotated[int, Form()] = 0,
+):
+    found = _search(search, acct, cat, asset, desc, start, end, share)
+    sort = sort if sort in SORT_KEYS else ""
+    error = _categorize(user.id, scope, account, date, description, amount, asset_name, category)
+    if error:
+        return _find_page(
+            request,
+            user,
+            nav,
+            found,
+            sort=sort,
+            desc=dir == "desc",
+            page_no=page,
+            edit=tid,
+            error=error,
+            status_code=400,
+        )
+    qs = _find_qs(found or Search(), sort, dir == "desc", page)
+    return _redirect(f"/find?{qs}" + (f"#t{tid}" if tid else ""))
+
+
+@router.post("/find/set-date")
+def find_set_date(
+    request: Request,
+    user: CurrentUser,
+    nav: Nav,
+    scope: Annotated[str, Form()],
+    account: Annotated[str, Form()],
+    date: Annotated[str, Form()],
+    description: Annotated[str, Form()],
+    amount: Annotated[float, Form()],
+    asset_name: Annotated[str, Form(alias="asset")],
+    acct: SearchAcct,
+    cat: SearchCat,
+    asset: SearchAsset,
+    search: bool = False,
+    desc: str = "",
+    start: str = "",
+    end: str = "",
+    share: bool = False,
+    sort: str = "",
+    dir: str = "",
+    page: int = 1,
+    effective: Annotated[str, Form()] = "",
+    tid: Annotated[int, Form()] = 0,
+):
+    found = _search(search, acct, cat, asset, desc, start, end, share)
+    sort = sort if sort in SORT_KEYS else ""
+    error = _set_date(user.id, scope, account, date, description, amount, asset_name, effective)
+    if error:
+        return _find_page(
+            request,
+            user,
+            nav,
+            found,
+            sort=sort,
+            desc=dir == "desc",
+            page_no=page,
+            redate=tid,
+            error=error,
+            status_code=400,
+        )
+    qs = _find_qs(found or Search(), sort, dir == "desc", page)
+    return _redirect(f"/find?{qs}" + (f"#d{tid}" if tid else ""))
 
 
 @router.get("/dashboard")

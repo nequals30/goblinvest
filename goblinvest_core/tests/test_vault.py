@@ -467,6 +467,148 @@ class TestListTransactionsDateRange:
         assert df["category"].tolist() == ["unclassified"]
 
 
+class TestListTransactionsFilters:
+    @pytest.fixture
+    def vault(self, filepath):
+        with Vault.create(filepath) as v:
+            v.add_account("checking", account_group_name="cash")
+            v.add_account("visa", account_group_name="cards")
+            v.add_account("brokerage", account_group_name="investments")
+            v.add_asset("VTI")
+            v.add_transactions(
+                ["checking", "checking", "visa", "visa", "visa", "brokerage", "brokerage"],
+                ["2026-07-01", "2026-07-01", "2026-07-02", "2026-07-02", "2026-07-03"]
+                + ["2026-07-04", "2026-07-04"],
+                ["Netflix", "Netflix", "SHELL GAS #12", "Las Vegas Hotel", "Steamboat Grill"]
+                + ["buy VTI", "buy VTI"],
+                [-15.0, -15.0, -40.0, -300.0, -60.0, -1000.0, 3.2],
+                assets=["USD", "USD", "USD", "USD", "USD", "USD", "VTI"],
+            )
+            v.add_category(["streaming", "dining"])
+            v.set_category_rule(["Netflix", "Steamboat Grill"], ["streaming", "dining"])
+            yield v
+
+    @staticmethod
+    def _descs(df):
+        return df["description"].tolist()
+
+    def test_one_account(self, vault):
+        df = vault.list_transactions(accounts="checking")
+        assert self._descs(df) == ["Netflix", "Netflix (2)"]
+
+    def test_a_list_of_accounts_matches_any_of_them(self, vault):
+        df = vault.list_transactions(accounts=["checking", "brokerage"])
+        assert set(df["account_name"]) == {"checking", "brokerage"}
+        assert len(df) == 4
+
+    def test_names_ignore_capitalization(self, vault):
+        assert len(vault.list_transactions(accounts="CHECKING")) == 2
+        assert len(vault.list_transactions(account_groups="Cards")) == 3
+        assert len(vault.list_transactions(assets="vti")) == 1
+        assert len(vault.list_transactions(categories="Streaming")) == 2
+
+    def test_account_groups(self, vault):
+        df = vault.list_transactions(account_groups=["cash", "investments"])
+        assert set(df["account_name"]) == {"checking", "brokerage"}
+
+    def test_assets_include_the_base_currency(self, vault):
+        df = vault.list_transactions(assets="USD")
+        assert len(df) == 6
+        assert set(df["asset"]) == {"USD"}
+
+    def test_categories(self, vault):
+        df = vault.list_transactions(categories=["streaming", "dining"])
+        assert self._descs(df) == ["Netflix", "Netflix (2)", "Steamboat Grill"]
+
+    def test_unclassified_selects_rows_without_a_category(self, vault):
+        df = vault.list_transactions(categories="unclassified")
+        assert self._descs(df) == ["SHELL GAS #12", "Las Vegas Hotel", "buy VTI", "buy VTI"]
+
+    def test_a_typo_raises_naming_every_unknown_name(self, vault):
+        with pytest.raises(ValueError, match="chekcing, vsia"):
+            vault.list_transactions(accounts=["vsia", "checking", "chekcing"])
+        with pytest.raises(ValueError, match="account groups.*: kash"):
+            vault.list_transactions(account_groups="kash")
+        with pytest.raises(ValueError, match="assets.*: VTSAX"):
+            vault.list_transactions(assets="VTSAX")
+        with pytest.raises(ValueError, match="categories.*: groceries"):
+            vault.list_transactions(categories="groceries")
+
+    def test_a_name_with_no_transactions_is_not_a_typo(self, vault):
+        vault.add_account("savings")
+        assert len(vault.list_transactions(accounts="savings")) == 0
+
+    def test_empty_list_matches_nothing(self, vault):
+        assert len(vault.list_transactions(accounts=[])) == 0
+        assert len(vault.list_transactions(descriptions=[])) == 0
+
+    def test_filters_combine_with_and(self, vault):
+        df = vault.list_transactions(
+            accounts=["visa", "brokerage"], categories="unclassified", end_date="2026-07-02"
+        )
+        assert self._descs(df) == ["SHELL GAS #12", "Las Vegas Hotel"]
+
+    def test_filters_accept_tuples_and_series(self, vault):
+        assert len(vault.list_transactions(accounts=("checking",))) == 2
+        assert len(vault.list_transactions(accounts=pd.Series(["checking"]))) == 2
+
+    def test_star_matches_anything_containing(self, vault):
+        df = vault.list_transactions(descriptions="*gas*")
+        assert self._descs(df) == ["SHELL GAS #12", "Las Vegas Hotel"]
+
+    def test_star_anchors_at_either_end(self, vault):
+        assert self._descs(vault.list_transactions(descriptions="shell*")) == ["SHELL GAS #12"]
+        assert self._descs(vault.list_transactions(descriptions="*hotel")) == ["Las Vegas Hotel"]
+
+    def test_without_a_star_the_whole_description_must_match(self, vault):
+        assert self._descs(vault.list_transactions(descriptions="steam")) == []
+        assert self._descs(vault.list_transactions(descriptions="steamboat grill")) == [
+            "Steamboat Grill"
+        ]
+
+    def test_duplicate_suffix_is_ignored_like_category_rules(self, vault):
+        df = vault.list_transactions(descriptions="netflix")
+        assert self._descs(df) == ["Netflix", "Netflix (2)"]
+
+    def test_the_suffix_can_still_be_matched_on_purpose(self, vault):
+        assert self._descs(vault.list_transactions(descriptions="*(2)")) == ["Netflix (2)"]
+
+    def test_a_list_of_patterns_matches_any_of_them(self, vault):
+        df = vault.list_transactions(descriptions=["shell*", "*grill"])
+        assert self._descs(df) == ["SHELL GAS #12", "Steamboat Grill"]
+
+    def test_only_star_is_special(self, vault):
+        # "#", "." and the like are literal, not regular-expression syntax.
+        assert self._descs(vault.list_transactions(descriptions="*#12")) == ["SHELL GAS #12"]
+        assert self._descs(vault.list_transactions(descriptions="shell gas .12")) == []
+        assert self._descs(vault.list_transactions(descriptions="shell gas ?12")) == []
+
+    def test_star_alone_matches_everything(self, vault):
+        assert len(vault.list_transactions(descriptions="*")) == 7
+
+    def test_filtered_rows_are_still_priced(self, vault):
+        with vault._conn:  # VTI is asset 2
+            vault._conn.execute(
+                "INSERT INTO prices (asset_id, price_date, price) VALUES (2, '2026-07-04', 312.5)"
+            )
+        df = vault.list_transactions(assets="VTI")
+        assert df["market_value"].tolist() == [1000.0]
+
+    def test_filtering_to_nothing_keeps_the_columns(self, vault):
+        df = vault.list_transactions(descriptions="nothing like this")
+        assert df.empty
+        assert list(df.columns) == list(vault.list_transactions().columns)
+        assert df["market_value"].dtype == float
+
+    def test_filters_on_an_empty_vault(self, filepath):
+        with Vault.create(filepath) as v:
+            v.add_account("checking")
+            df = v.list_transactions(
+                accounts="checking", assets="USD", categories="unclassified", descriptions="*a*"
+            )
+        assert df.empty
+
+
 class TestListTransactionsMarketValue:
     @pytest.fixture
     def vault(self, filepath):

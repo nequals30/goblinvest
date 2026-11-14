@@ -25,13 +25,19 @@ def item_ids(html: str) -> list[int]:
 
 def test_builtins_seeded_at_signup(signed_up):
     html = signed_up.get("/").text
-    assert sidebar_labels(html) == ["CSV Import", "Month View", "Main Dashboard"]
+    assert sidebar_labels(html) == [
+        "CSV Import",
+        "Month View",
+        "Find Transactions",
+        "Main Dashboard",
+    ]
 
 
 def test_placeholder_pages_render(signed_up):
     for url, heading in [
         ("/import", "CSV Import"),
         ("/month", "Month View"),
+        ("/find", "Find Transactions"),
         ("/dashboard", "Main Dashboard"),
     ]:
         r = signed_up.get(url)
@@ -56,13 +62,15 @@ def test_move_reorders_the_pane(signed_up):
     signed_up.post(f"{NAV_URL}/{ids[2]}/move", data={"direction": "up"})
     assert sidebar_labels(signed_up.get("/").text) == [
         "CSV Import",
-        "Main Dashboard",
+        "Find Transactions",
         "Month View",
+        "Main Dashboard",
     ]
     signed_up.post(f"{NAV_URL}/{ids[2]}/move", data={"direction": "down"})
     assert sidebar_labels(signed_up.get("/").text) == [
         "CSV Import",
         "Month View",
+        "Find Transactions",
         "Main Dashboard",
     ]
 
@@ -78,7 +86,11 @@ def test_hiding_removes_from_pane_but_not_from_settings(signed_up):
     ids = item_ids(signed_up.get(NAV_URL).text)
     signed_up.post(f"{NAV_URL}/{ids[1]}/visibility", data={"hidden": 1})
 
-    assert sidebar_labels(signed_up.get("/").text) == ["CSV Import", "Main Dashboard"]
+    assert sidebar_labels(signed_up.get("/").text) == [
+        "CSV Import",
+        "Find Transactions",
+        "Main Dashboard",
+    ]
     settings_html = signed_up.get(NAV_URL).text
     assert "Month View" in settings_html and item_ids(settings_html) == ids
 
@@ -135,6 +147,7 @@ def test_delete_removes_a_dashboard_but_not_a_builtin(signed_up):
     assert sidebar_labels(signed_up.get("/").text) == [
         "CSV Import",
         "Month View",
+        "Find Transactions",
         "Main Dashboard",
     ]
 
@@ -157,6 +170,7 @@ def test_builtins_are_seeded_lazily_for_older_users(signed_up):
 
     assert sidebar_labels(signed_up.get("/").text) == [
         "CSV Import",
+        "Find Transactions",
         "Main Dashboard",
         "Month View",
     ]

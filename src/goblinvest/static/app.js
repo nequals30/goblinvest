@@ -232,6 +232,10 @@
  * page keeps the native multi-select and its data-nojs submit button, and the
  * server sees the same request either way.
  *
+ * Inside a <form data-manual> — Find Transactions, which has a Search button —
+ * a tick only changes the pick: nothing submits until the button is pressed,
+ * and there is no menu to re-open, because no tick reloaded the page.
+ *
  * Nothing ticked means no filter, and so does everything ticked — they are the
  * same request. "all" and "none" are still both offered, because "all" is how
  * you say "everything except this one" without ticking fourteen boxes.
@@ -287,6 +291,7 @@
 
     var boxes = [];
     var settling = null;
+    var manual = !!(select.form && select.form.hasAttribute("data-manual"));
 
     function relabel() {
       var chosen = picked(select);
@@ -316,6 +321,7 @@
     // stops. One load for "groceries, rent, travel", not three.
     function apply() {
       relabel();
+      if (manual) return;
       clearTimeout(settling);
       settling = setTimeout(function () {
         if (select.form) select.form.submit();
@@ -368,7 +374,7 @@
       menu.hidden = false;
       button.setAttribute("aria-expanded", "true");
       open = hide;
-      remember(select, true);
+      if (!manual) remember(select, true);
     }
 
     function hide() {
@@ -401,7 +407,7 @@
     select.parentNode.insertBefore(combo, select);
     select.hidden = true; // still submitted — it's what holds the values
 
-    if (wasOpen(select)) show();
+    if (!manual && wasOpen(select)) show();
   }
 
   document.querySelectorAll("select[multiple][data-combo]").forEach(build);

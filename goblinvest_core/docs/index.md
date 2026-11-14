@@ -86,6 +86,39 @@ value covers the whole transaction, not your share of a joint account. Pass
 v.list_transactions(apply_ownership_share=True)
 ```
 
+### Finding transactions
+
+`list_transactions` narrows its result by date, account, account group, asset,
+category, and description. Each filter takes one value or a list, and a list
+matches any value in it. When you give several filters, a transaction has to
+match all of them:
+
+```python
+v.list_transactions(start_date="2026-01-01", end_date="2026-03-31")
+v.list_transactions(accounts=["checking", "visa"], categories="groceries")
+v.list_transactions(account_groups="investments", assets="VTI")
+v.list_transactions(categories="unclassified")   # transactions with no category yet
+```
+
+Descriptions are matched with patterns, where `*` stands for any run of
+characters:
+
+| Pattern | Matches |
+| --- | --- |
+| `"*gas*"` | any description containing "gas" |
+| `"shell*"` | descriptions starting with "shell" |
+| `"*#123"` | descriptions ending with "#123" |
+| `"Netflix"` | "Netflix" and nothing else |
+
+```python
+v.list_transactions(descriptions=["*shell*", "*chevron*"], start_date="2026-01-01")
+```
+
+Capitalization is ignored everywhere. A pattern without `*` matches
+descriptions the same way a category rule does, so `"Netflix"` also finds a
+same-day duplicate listed as "Netflix (2)". A name the vault doesn't have, such
+as a misspelled account, raises an error rather than returning nothing.
+
 Deleting an account or an asset deletes its transactions too, so both ask you to
 confirm at the terminal first and do nothing unless you answer `y`:
 

@@ -27,6 +27,7 @@ DASHBOARD = "dashboard"
 BUILTINS: tuple[tuple[str, str, str], ...] = (
     ("csv-import", "CSV Import", "/import"),
     ("month-view", "Month View", "/month"),
+    ("find-transactions", "Find Transactions", "/find"),
     ("main-dashboard", "Main Dashboard", "/dashboard"),
 )
 

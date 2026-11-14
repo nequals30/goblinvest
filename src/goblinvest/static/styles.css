@@ -247,6 +247,8 @@ table.grid th .sort-btn {
   cursor: pointer;
 }
 table.grid th.num .sort-btn { text-align: right; }
+/* Find Transactions sorts on the server, so its .sort-btn is a link. */
+table.grid th a.sort-btn { text-decoration: none; }
 table.grid th .sort-btn:hover { background: var(--border); }
 table.grid th .sort-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 table.grid th[aria-sort] .sort-btn::after { content: " ⇅"; opacity: 0.3; }
@@ -290,6 +292,37 @@ table.grid th[aria-sort="descending"] .sort-btn::after { content: " ↓"; opacit
   white-space: nowrap;
 }
 .filters .toggle input { margin: 0; cursor: pointer; }
+/* Find Transactions' text and date fields. `form label` and the global
+   `form input` rule both reach in here — block, full width, an 8px margin
+   that lifts the item in a centred flex row — so both are undone, and the
+   selector carries enough to outrank (0,2,2). */
+.filters label.field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+form.filters label.field input:not([type="checkbox"]) {
+  display: inline-block;
+  width: auto;
+  margin: 0;
+  padding: 2px 4px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg);
+}
+.filters button.search {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 12px;
+  padding: 3px 12px;
+  margin-left: 6px;
+  cursor: pointer;
+}
+.filters button.search:hover { filter: brightness(1.15); }
 
 /* the checkbox dropdown app.js builds over each multi-select */
 .combo { position: relative; }
@@ -454,6 +487,9 @@ table.grid .date-form a.cancel:hover { color: var(--error); }
   cursor: pointer;
 }
 .pager button:disabled { opacity: 0.35; cursor: default; }
+/* The server-side pager on Find Transactions: links, and a dead end is text. */
+.pager a { color: var(--fg); }
+.pager .off { opacity: 0.35; }
 
 form.narrow { max-width: 280px; }
 form.row { display: flex; gap: 8px; align-items: flex-end; }
